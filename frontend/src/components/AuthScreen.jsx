@@ -17,10 +17,12 @@ export default function AuthScreen({ setUser }) {
         await signInWithEmailAndPassword(auth, email, password)
       } else {
         const userCredential = await createUserWithEmailAndPassword(auth, email, password)
-        // Save the new user to the Firestore users collection so they are searchable
+        const initialUsername = email.split('@')[0]
+        // Save the new user to the Firestore users collection so they are searchable by username
         await setDoc(doc(db, 'users', userCredential.user.uid), {
           uid: userCredential.user.uid,
           email: userCredential.user.email,
+          username: initialUsername,
           createdAt: serverTimestamp()
         })
       }

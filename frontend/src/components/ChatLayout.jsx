@@ -1,8 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { auth, db, storage } from '../firebase'
-import { collection, query, orderBy, limit, onSnapshot, addDoc, serverTimestamp, where, getDocs, doc, updateDoc, deleteDoc, setDoc, increment, writeBatch, deleteField } from 'firebase/firestore'
+import { collection, query, orderBy, limit, onSnapshot, addDoc, serverTimestamp, where, getDocs, getDoc, doc, updateDoc, deleteDoc, setDoc, increment, writeBatch, deleteField, arrayUnion } from 'firebase/firestore'
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage'
-import { LogOut, Send, Settings, Search, User, UserPlus, UserMinus, Check, X, MessageSquare, ChevronLeft, Camera, Palette, CheckCheck, Info, Bell, BellOff, Paperclip, Image as ImageIcon, FileText, Download, Loader2, Trash2, CheckSquare, Square, MoreVertical, Sparkles, Mail, Copy, Maximize2 } from 'lucide-react'
+import { LogOut, Send, Settings, Search, User, UserPlus, UserMinus, Check, X, MessageSquare, ChevronLeft, Camera, Palette, CheckCheck, Info, Bell, BellOff, Paperclip, Image as ImageIcon, FileText, Download, Loader2, Trash2, CheckSquare, Square, MoreVertical, Sparkles, Mail, Copy, Maximize2, Phone, Video, Mic, Lock, ShieldCheck, Users, PhoneCall, PhoneOff, AlertCircle, AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { getOrGenerateKeyPair, getSharedKey, encryptData, decryptData, importGroupKey } from '../crypto/e2ee'
+import { startCall, answerCall, declineCall } from '../services/webrtc'
+import { joinGroupCall, listenForGroupActiveCall } from '../services/groupWebRTC'
+import VoiceRecorder from './chat/VoiceRecorder'
+import AudioMessageBubble from './chat/AudioMessageBubble'
+import IncomingCallDialog from './calls/IncomingCallDialog'
+import CallModal from './calls/CallModal'
+import GroupCallModal from './calls/GroupCallModal'
+import CreateGroupModal from './modals/CreateGroupModal'
+import GroupInfoModal from './modals/GroupInfoModal'
 
 export default function ChatLayout({ user }) {
   const [messages, setMessages] = useState([])
@@ -15,6 +25,38 @@ export default function ChatLayout({ user }) {
   const [incomingRequests, setIncomingRequests] = useState([])
   const [chats, setChats] = useState([])
   const [currentChat, setCurrentChat] = useState(null)
+
+  // E2EE state
+  const [myPrivateKey, setMyPrivateKey] = useState(null)
+  const [myPublicKeyJwk, setMyPublicKeyJwk] = useState(null)
+  const [decryptedMap, setDecryptedMap] = useState({}) // { [msgId]: { text, fileUrl } }
+
+  // WebRTC Call state
+  const [activeCallSession, setActiveCallSession] = useState(null)
+  const [incomingCall, setIncomingCall] = useState(null)
+  const [activeGroupCallSession, setActiveGroupCallSession] = useState(null)
+  const [activeGroupCallForChat, setActiveGroupCallForChat] = useState(null)
+  const [activeGroupCalls, setActiveGroupCalls] = useState({})
+  const dismissedCallsRef = useRef(new Set())
+
+  // In-app Webpage Toast Notification state
+  const [toast, setToast] = useState(null) // { message, type: 'info' | 'error' | 'success' | 'call-declined' | 'warning', id }
+  const appToastTimeoutRef = useRef(null)
+
+  const showToast = (message, type = 'info', duration = 3500) => {
+    if (appToastTimeoutRef.current) clearTimeout(appToastTimeoutRef.current)
+    setToast({ message, type, id: Date.now() })
+    appToastTimeoutRef.current = setTimeout(() => {
+      setToast(null)
+    }, duration)
+  }
+
+  // Voice Note state
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false)
+
+  // Group Chat Modals
+  const [showCreateGroupModal, setShowCreateGroupModal] = useState(false)
+  const [showGroupInfoModal, setShowGroupInfoModal] = useState(false)
 
   // Profile settings state
   const [showProfileModal, setShowProfileModal] = useState(false)
@@ -210,6 +252,30 @@ export default function ChatLayout({ user }) {
   const currentChatRef = useRef(currentChat)
   const typingTimeoutRef = useRef(null)
   const isTypingRef = useRef(false)
+  const lastMsgTapRef = useRef({ id: null, time: 0 })
+
+  // Double-tap or double-click to view message information
+  const handleMessageBubbleClick = (msg, computedStatus) => {
+    if (isSelectMode) {
+      handleToggleSelectMessage(msg.id)
+      return
+    }
+
+    const now = Date.now()
+    const lastTap = lastMsgTapRef.current
+    if (lastTap.id === msg.id && (now - lastTap.time) < 350) {
+      // Double tap detected! Open message info
+      setMessageReadInfo({ ...msg, computedStatus })
+      lastMsgTapRef.current = { id: null, time: 0 }
+    } else {
+      lastMsgTapRef.current = { id: msg.id, time: now }
+    }
+  }
+
+  const handleMessageBubbleDoubleClick = (msg, computedStatus) => {
+    if (isSelectMode) return
+    setMessageReadInfo({ ...msg, computedStatus })
+  }
 
   useEffect(() => {
     currentChatRef.current = currentChat
@@ -607,7 +673,7 @@ export default function ChatLayout({ user }) {
   // Request browser desktop notification permission
   const requestNotifPermission = async () => {
     if (!('Notification' in window)) {
-      alert('This browser does not support desktop notifications.')
+      showToast('This browser does not support desktop notifications.', 'warning')
       return
     }
     try {
@@ -717,20 +783,206 @@ export default function ChatLayout({ user }) {
     return () => unsubscribe()
   }, [user.uid, showProfileModal])
 
-  // Auto-sync user to db (initial registration guard)
+  // Auto-sync user to db (initial registration guard & E2EE Key Sync)
   useEffect(() => {
-    const syncUserToDb = async () => {
+    const syncUserAndInitE2EE = async () => {
       try {
-        await setDoc(doc(db, 'users', user.uid), {
+        let pubKey = null
+        try {
+          const keys = await getOrGenerateKeyPair(user.uid)
+          setMyPrivateKey(keys.privateKey)
+          setMyPublicKeyJwk(keys.publicKeyJwk)
+          pubKey = keys.publicKeyJwk
+        } catch (cryptoErr) {
+          console.warn('E2EE key generation notice:', cryptoErr)
+        }
+
+        const userDocRef = doc(db, 'users', user.uid)
+        const userDocSnap = await getDoc(userDocRef)
+        const existingData = userDocSnap.exists() ? userDocSnap.data() : {}
+
+        const updateData = {
           uid: user.uid,
           email: user.email,
-        }, { merge: true });
+        }
+        if (!existingData.username) {
+          updateData.username = user.displayName || user.email?.split('@')[0] || `user_${user.uid.slice(0, 5)}`
+        }
+        if (pubKey) {
+          updateData.publicKey = pubKey
+        }
+
+        await setDoc(userDocRef, updateData, { merge: true })
       } catch (err) {
-        console.error('Error syncing user to DB:', err);
+        console.error('Error syncing user to DB:', err)
       }
-    };
-    syncUserToDb();
-  }, [user]);
+    }
+    syncUserAndInitE2EE()
+  }, [user])
+
+  // Listen for Incoming WebRTC Calls (1-on-1)
+  useEffect(() => {
+    if (!user?.uid) return
+    const q = query(
+      collection(db, 'calls'),
+      where('calleeUid', '==', user.uid),
+      where('status', '==', 'ringing')
+    )
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      if (snapshot.empty) {
+        setIncomingCall((prev) => (!prev?.isGroup ? null : prev))
+        return
+      }
+      snapshot.docs.forEach((docSnap) => {
+        const data = { id: docSnap.id, ...docSnap.data() }
+        if (dismissedCallsRef.current.has(data.id)) return
+        if (activeCallSession?.callId === data.id) return
+
+        // Active ringing call check: status must be ringing and not ended
+        if (data.status === 'ringing' && !data.endedAt) {
+          setIncomingCall(data)
+
+          if (document.visibilityState !== 'visible' || !document.hasFocus()) {
+            if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+              try {
+                const notif = new Notification(`Incoming ${data.type === 'video' ? 'Video' : 'Voice'} Call`, {
+                  body: `${data.callerName || 'Someone'} is calling you...`,
+                  icon: data.callerPhoto || '/icon.png',
+                  tag: data.id
+                })
+                notif.onclick = () => {
+                  window.focus()
+                  notif.close()
+                }
+              } catch (e) {}
+            }
+          }
+        }
+      })
+    })
+    return () => unsubscribe()
+  }, [user.uid, activeCallSession?.callId])
+
+  // Sync active group call for currently opened chat
+  useEffect(() => {
+    if (!currentChat) {
+      setActiveGroupCallForChat(null)
+      return
+    }
+    setActiveGroupCallForChat(activeGroupCalls[currentChat.id] || null)
+  }, [currentChat?.id, activeGroupCalls])
+
+  // Listen for all active group calls across user's groups
+  useEffect(() => {
+    if (!user?.uid) return
+
+    const q = query(
+      collection(db, 'groupCalls'),
+      where('status', '==', 'active')
+    )
+
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const callsByChatId = {}
+      const activeCallsList = []
+
+      snapshot.docs.forEach((docSnap) => {
+        const data = { id: docSnap.id, ...docSnap.data() }
+        const declined = data.declinedUids || []
+        const members = data.members || []
+        const otherMembers = members.filter((m) => m !== data.hostUid)
+        const allDeclined = otherMembers.length > 0 && otherMembers.every((m) => declined.includes(m))
+        const pUids = data.participantUids || []
+
+        // A call is stale if created more than 90 seconds ago with 0 or 1 participant and host is not in this session
+        const isStaleOldCall = data.createdAt?.toMillis && (Date.now() - data.createdAt.toMillis() > 90000) && pUids.length <= 1 && (!activeGroupCallSession || activeGroupCallSession.callId !== data.id)
+
+        // If call is ended, or all invited members declined, or room has 0 participants, or stale abandoned call
+        if (data.status === 'ended' || data.endedAt || allDeclined || pUids.length === 0 || isStaleOldCall) {
+          if (data.hostUid === user.uid && data.status === 'active') {
+            updateDoc(doc(db, 'groupCalls', data.id), {
+              status: 'ended',
+              endedAt: serverTimestamp(),
+              endReason: allDeclined ? 'declined' : isStaleOldCall ? 'stale' : 'empty',
+              participantUids: []
+            }).catch(() => {})
+          }
+          return
+        }
+
+        callsByChatId[data.chatId] = data
+        activeCallsList.push(data)
+      })
+
+      setActiveGroupCalls(callsByChatId)
+
+      // Find if there is an active call in any group the user belongs to
+      const myGroupChatIds = chats.filter((c) => c.type === 'group' || c.isGroup).map((c) => c.id)
+
+      const activeGroupCall = activeCallsList.find((call) => {
+        if (call.hostUid === user.uid) return false
+        if (dismissedCallsRef.current.has(call.id)) return false
+        if (call.declinedUids && Array.isArray(call.declinedUids) && call.declinedUids.includes(user.uid)) return false
+        if (activeGroupCallSession?.callId === call.id) return false
+
+        const isMember = (call.members && Array.isArray(call.members) && call.members.includes(user.uid)) ||
+          myGroupChatIds.includes(call.chatId) ||
+          currentChat?.id === call.chatId ||
+          chats.some((c) => c.id === call.chatId && (c.participants?.includes(user.uid) || c.type === 'group' || c.isGroup))
+
+        if (!isMember && (call.members?.length > 0 || myGroupChatIds.length > 0)) return false
+
+        // Status is active and call has not ended
+        return call.status === 'active' && !call.endedAt
+      })
+
+      if (activeGroupCall) {
+        const foundGroup = chats.find((c) => c.id === activeGroupCall.chatId) || (currentChat?.id === activeGroupCall.chatId ? currentChat : {
+          id: activeGroupCall.chatId,
+          type: 'group',
+          name: activeGroupCall.groupName,
+          photoURL: activeGroupCall.groupPhoto,
+          participants: activeGroupCall.members || []
+        })
+
+        setIncomingCall({
+          id: activeGroupCall.id,
+          chatId: activeGroupCall.chatId,
+          isGroup: true,
+          chatType: 'group',
+          groupChat: foundGroup,
+          groupName: activeGroupCall.groupName || 'Group',
+          groupPhoto: activeGroupCall.groupPhoto || null,
+          callerName: activeGroupCall.hostName || 'Group Member',
+          callerPhoto: activeGroupCall.hostPhoto || null,
+          type: activeGroupCall.isVideo ? 'video' : 'audio',
+          createdAt: activeGroupCall.createdAt
+        })
+
+        if (document.visibilityState !== 'visible' || !document.hasFocus()) {
+          if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+            try {
+              const notif = new Notification(`Incoming Group Video Call: ${activeGroupCall.groupName || 'Group'}`, {
+                body: `${activeGroupCall.hostName || 'A member'} started a video call. Click to join!`,
+                icon: activeGroupCall.groupPhoto || '/icon.png',
+                tag: activeGroupCall.id
+              })
+              notif.onclick = () => {
+                window.focus()
+                if (foundGroup) setCurrentChat(foundGroup)
+                notif.close()
+              }
+            } catch (e) {}
+          }
+        }
+      } else {
+        setIncomingCall((prev) => (prev?.isGroup ? null : prev))
+      }
+    }, (err) => {
+      console.warn('Error listening to groupCalls:', err)
+    })
+
+    return () => unsubscribe()
+  }, [user.uid, chats, currentChat?.id, activeGroupCallSession?.callId])
 
   // Listen for Incoming Requests
   useEffect(() => {
@@ -755,17 +1007,19 @@ export default function ChatLayout({ user }) {
     )
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const c = []
-      const seenEmails = new Set()
+      const seenKeys = new Set()
 
       snapshot.forEach(docSnap => {
         const data = docSnap.data()
-        const otherEmail = data.participantEmails.find(e => e !== user.email) || 'Unknown'
-        const otherUid = data.participants.find(p => p !== user.uid)
+        const isGroup = data.type === 'group'
+        const otherEmail = isGroup ? (data.name || 'Group') : (data.participantEmails?.find(e => e !== user.email) || 'Unknown')
+        const otherUid = isGroup ? null : data.participants?.find(p => p !== user.uid)
+        const chatKey = isGroup ? docSnap.id : (otherUid || docSnap.id)
 
-        if (!seenEmails.has(otherEmail)) {
-          seenEmails.add(otherEmail)
+        if (!seenKeys.has(chatKey)) {
+          seenKeys.add(chatKey)
 
-          const chatData = { id: docSnap.id, otherEmail, otherUid, ...data }
+          const chatData = { id: docSnap.id, otherEmail, otherUid, isGroup, ...data }
           c.push(chatData)
 
           // Auto-clear unread count if we are currently looking at this chat!
@@ -900,6 +1154,57 @@ export default function ChatLayout({ user }) {
     return () => unsubscribe()
   }, [currentChat?.id, user.uid, activeChatClearedAt])
 
+  // Decrypt incoming encrypted messages
+  useEffect(() => {
+    if (!messages.length || !currentChat) return
+
+    const decryptMessages = async () => {
+      const isGroup = currentChat.type === 'group'
+      let key = null
+
+      if (isGroup && currentChat.e2eeKeyJwk) {
+        try {
+          key = await importGroupKey(currentChat.e2eeKeyJwk)
+        } catch (e) {
+          console.warn('Group key import error:', e)
+        }
+      } else if (!isGroup && myPrivateKey) {
+        const otherUid = currentChat.otherUid
+        const otherUser = usersMap[otherUid]
+        if (otherUser?.publicKey) {
+          key = await getSharedKey(myPrivateKey, otherUser.publicKey, otherUid)
+        }
+      }
+
+      if (!key) return
+
+      const updates = {}
+      for (const m of messages) {
+        if (m.isEncrypted && !decryptedMap[m.id]) {
+          try {
+            let decText = m.text
+            let decFileUrl = m.fileUrl
+            if (m.text && m.iv) {
+              decText = await decryptData(m.text, m.iv, key)
+            }
+            if (m.fileUrl && m.fileUrlIv) {
+              decFileUrl = await decryptData(m.fileUrl, m.fileUrlIv, key)
+            }
+            updates[m.id] = { text: decText, fileUrl: decFileUrl }
+          } catch (decErr) {
+            console.warn('Decryption failed for msg', m.id, decErr)
+          }
+        }
+      }
+
+      if (Object.keys(updates).length > 0) {
+        setDecryptedMap((prev) => ({ ...prev, ...updates }))
+      }
+    }
+
+    decryptMessages()
+  }, [messages, currentChat?.id, myPrivateKey, usersMap])
+
   // Auto-mark incoming messages as 'read' when actively viewing the chat
   useEffect(() => {
     if (!currentChat || !messages.length) return
@@ -993,10 +1298,11 @@ export default function ChatLayout({ user }) {
     }
   }, [messages])
 
-  // Search logic
+  // Search logic - search ONLY by username
   useEffect(() => {
     const searchUsers = async () => {
-      if (!searchQuery.trim()) {
+      const trimmed = searchQuery.trim().toLowerCase()
+      if (!trimmed) {
         setSearchResults([])
         setIsSearching(false)
         return
@@ -1004,17 +1310,25 @@ export default function ChatLayout({ user }) {
 
       setIsSearching(true)
       try {
-        const lowerQuery = searchQuery.toLowerCase();
-        // Since we already have usersMap, we could search locally, but let's stick to the db query for now
-        const querySnapshot = await getDocs(collection(db, 'users'));
-        const results = [];
+        // Strip leading @ if entered by user (e.g. "@alex" -> "alex")
+        const cleanQuery = trimmed.startsWith('@') ? trimmed.slice(1) : trimmed
+        if (!cleanQuery) {
+          setSearchResults([])
+          setIsSearching(false)
+          return
+        }
+
+        const querySnapshot = await getDocs(collection(db, 'users'))
+        const results = []
         querySnapshot.forEach((doc) => {
-          const data = doc.data();
-          if (data.email && data.email.toLowerCase().includes(lowerQuery)) {
-            results.push(data);
+          const data = doc.data()
+          const username = (data.username || '').toLowerCase()
+          // Search STRICTLY by username only
+          if (username && username.includes(cleanQuery)) {
+            results.push(data)
           }
-        });
-        setSearchResults(results.slice(0, 5));
+        })
+        setSearchResults(results.slice(0, 10))
       } catch (err) {
         console.error('Error searching users:', err)
       } finally {
@@ -1069,7 +1383,26 @@ export default function ChatLayout({ user }) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
   }
 
+  // Group Permissions helpers
+  const isCurrentGroup = Boolean(currentChat?.type === 'group' || currentChat?.isGroup)
+  const isCurrentGroupAdmin = Boolean(
+    isCurrentGroup && (
+      currentChat?.adminUids?.includes(user?.uid) || currentChat?.createdBy === user?.uid
+    )
+  )
+  const canSendInGroup = !isCurrentGroup || (
+    (currentChat?.permissions?.whoCanMessage || 'all') !== 'admins' || isCurrentGroupAdmin
+  )
+  const canStartCallInGroup = !isCurrentGroup || (
+    (currentChat?.permissions?.whoCanCall || 'all') !== 'admins' || isCurrentGroupAdmin
+  )
+
   const handleSelectAttachment = async (e, isImageOnly = false) => {
+    if (!canSendInGroup) {
+      showToast('Only group admins can send messages and files in this group.', 'warning')
+      if (e?.target) e.target.value = ''
+      return
+    }
     const file = e.target.files?.[0]
     if (!file) return
 
@@ -1103,7 +1436,7 @@ export default function ChatLayout({ user }) {
       }
     } else {
       if (file.size > 650 * 1024) {
-        alert('File size exceeds 650 KB limit for direct instant sharing. Please choose a smaller file.')
+        showToast('File size exceeds 650 KB limit for direct instant sharing. Please choose a smaller file.', 'warning')
         e.target.value = ''
         return
       }
@@ -1212,6 +1545,10 @@ export default function ChatLayout({ user }) {
 
   const handleSend = async (e) => {
     if (e && e.preventDefault) e.preventDefault()
+    if (!canSendInGroup) {
+      showToast('Only group admins can send messages in this group.', 'warning')
+      return
+    }
     if ((!newMessage.trim() && !stagedAttachment) || !currentChat || isUploading) return
 
     const messageText = newMessage.trim()
@@ -1225,9 +1562,10 @@ export default function ChatLayout({ user }) {
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current)
     }
 
-    const otherUid = currentChat.participants.find(p => p !== user.uid)
-    const otherUser = usersMap[otherUid]
-    const isOtherOnline = isUserOnline(otherUser)
+    const isGroup = currentChat.type === 'group'
+    const otherUid = isGroup ? null : currentChat.participants.find(p => p !== user.uid)
+    const otherUser = isGroup ? null : usersMap[otherUid]
+    const isOtherOnline = otherUser ? isUserOnline(otherUser) : false
     const initialStatus = isOtherOnline ? 'delivered' : 'sent'
 
     try {
@@ -1249,41 +1587,531 @@ export default function ChatLayout({ user }) {
         lastMsgPreview = attachmentToSend.isImage ? '📷 Photo' : `📎 ${attachmentToSend.name}`
       }
 
+      // E2EE Encryption
+      let finalMsgText = messageText
+      let textIv = null
+      let finalFileUrl = fileUrl
+      let fileUrlIv = null
+      let isEncrypted = false
+
+      if (isGroup && currentChat.e2eeKeyJwk) {
+        try {
+          const groupKey = await importGroupKey(currentChat.e2eeKeyJwk)
+          if (messageText) {
+            const enc = await encryptData(messageText, groupKey)
+            finalMsgText = enc.ciphertext
+            textIv = enc.iv
+            isEncrypted = true
+          }
+          if (fileUrl) {
+            const encFile = await encryptData(fileUrl, groupKey)
+            finalFileUrl = encFile.ciphertext
+            fileUrlIv = encFile.iv
+            isEncrypted = true
+          }
+        } catch (encErr) {
+          console.warn('Group encryption fallback:', encErr)
+        }
+      } else if (!isGroup && otherUser?.publicKey && myPrivateKey) {
+        try {
+          const sharedKey = await getSharedKey(myPrivateKey, otherUser.publicKey, otherUid)
+          if (sharedKey) {
+            if (messageText) {
+              const enc = await encryptData(messageText, sharedKey)
+              finalMsgText = enc.ciphertext
+              textIv = enc.iv
+              isEncrypted = true
+            }
+            if (fileUrl) {
+              const encFile = await encryptData(fileUrl, sharedKey)
+              finalFileUrl = encFile.ciphertext
+              fileUrlIv = encFile.iv
+              isEncrypted = true
+            }
+          }
+        } catch (encErr) {
+          console.warn('1-on-1 encryption fallback:', encErr)
+        }
+      }
+
       // 1. Save the actual message
-      await addDoc(collection(db, 'messages'), {
-        text: messageText,
+      const newMsgDoc = await addDoc(collection(db, 'messages'), {
+        text: finalMsgText,
+        iv: textIv || null,
+        isEncrypted,
         chatId: currentChat.id,
         uid: user.uid,
         email: user.email,
-        to: otherUid,
+        to: otherUid || null,
         status: initialStatus,
         deliveredAt: isOtherOnline ? serverTimestamp() : null,
         readAt: null,
         createdAt: serverTimestamp(),
-        fileUrl: fileUrl || null,
+        fileUrl: finalFileUrl || null,
+        fileUrlIv: fileUrlIv || null,
         fileName: fileName || null,
         fileType: fileType || null,
         fileSize: fileSize || null,
         isImage: attachmentToSend ? attachmentToSend.isImage : false
       })
 
-      // 2. Update chat document with last message, unread count, clear typing, and reset any per-user message overrides
-      await updateDoc(doc(db, 'chats', currentChat.id), {
+      // Immediate local decrypted cache for fast rendering
+      if (isEncrypted) {
+        setDecryptedMap(prev => ({
+          ...prev,
+          [newMsgDoc.id]: { text: messageText, fileUrl }
+        }))
+      }
+
+      // 2. Prepare unread count updates
+      const unreadUpdates = {}
+      if (isGroup) {
+        currentChat.participants.forEach(pId => {
+          if (pId !== user.uid) {
+            unreadUpdates[`unreadCount.${pId}`] = increment(1)
+          }
+        })
+      } else if (otherUid) {
+        unreadUpdates[`unreadCount.${otherUid}`] = increment(1)
+      }
+
+      // 3. Update chat document
+      const chatUpdates = {
         lastMessage: lastMsgPreview,
         lastMessageSender: user.uid,
         lastMessageTime: serverTimestamp(),
         lastMessageStatus: initialStatus,
-        [`unreadCount.${otherUid}`]: increment(1),
-        [`typing.${user.uid}`]: false,
-        [`userLastMessage.${user.uid}`]: deleteField(),
-        [`userLastMessage.${otherUid}`]: deleteField()
-      })
+        ...unreadUpdates,
+        [`typing.${user.uid}`]: false
+      }
+      if (!isGroup && otherUid) {
+        chatUpdates[`userLastMessage.${user.uid}`] = deleteField()
+        chatUpdates[`userLastMessage.${otherUid}`] = deleteField()
+      }
+
+      await updateDoc(doc(db, 'chats', currentChat.id), chatUpdates)
     } catch (err) {
       console.error('Error sending message/attachment:', err)
-      alert(err.message || 'Failed to send file.')
+      showToast(err.message || 'Failed to send file.', 'error')
     } finally {
       setIsUploading(false)
     }
+  }
+
+  // Voice Note Send Handler
+  const handleSendVoiceNote = async (audioDataUrl, duration) => {
+    if (!canSendInGroup) {
+      showToast('Only group admins can send voice notes in this group.', 'warning')
+      return
+    }
+    if (!currentChat || isUploading) return
+    setIsRecordingVoice(false)
+
+    const isGroup = currentChat.type === 'group'
+    const otherUid = isGroup ? null : currentChat.participants.find(p => p !== user.uid)
+    const otherUser = isGroup ? null : usersMap[otherUid]
+    const isOtherOnline = otherUser ? isUserOnline(otherUser) : false
+    const initialStatus = isOtherOnline ? 'delivered' : 'sent'
+
+    try {
+      setIsUploading(true)
+      let finalAudioUrl = audioDataUrl
+      let audioIv = null
+      let isEncrypted = false
+
+      if (isGroup && currentChat.e2eeKeyJwk) {
+        try {
+          const groupKey = await importGroupKey(currentChat.e2eeKeyJwk)
+          const enc = await encryptData(audioDataUrl, groupKey)
+          finalAudioUrl = enc.ciphertext
+          audioIv = enc.iv
+          isEncrypted = true
+        } catch (e) {
+          console.warn('Group audio encryption error:', e)
+        }
+      } else if (!isGroup && otherUser?.publicKey && myPrivateKey) {
+        try {
+          const sharedKey = await getSharedKey(myPrivateKey, otherUser.publicKey, otherUid)
+          if (sharedKey) {
+            const enc = await encryptData(audioDataUrl, sharedKey)
+            finalAudioUrl = enc.ciphertext
+            audioIv = enc.iv
+            isEncrypted = true
+          }
+        } catch (e) {
+          console.warn('1-on-1 audio encryption error:', e)
+        }
+      }
+
+      const newMsgDoc = await addDoc(collection(db, 'messages'), {
+        text: '🎤 Voice message',
+        chatId: currentChat.id,
+        uid: user.uid,
+        email: user.email,
+        to: otherUid || null,
+        status: initialStatus,
+        deliveredAt: isOtherOnline ? serverTimestamp() : null,
+        readAt: null,
+        createdAt: serverTimestamp(),
+        fileUrl: finalAudioUrl,
+        fileUrlIv: audioIv || null,
+        isEncrypted,
+        isAudio: true,
+        duration: duration || 1,
+        fileName: 'voice-note.webm',
+        fileType: 'audio/webm'
+      })
+
+      if (isEncrypted) {
+        setDecryptedMap(prev => ({
+          ...prev,
+          [newMsgDoc.id]: { text: '🎤 Voice message', fileUrl: audioDataUrl }
+        }))
+      }
+
+      const unreadUpdates = {}
+      if (isGroup) {
+        currentChat.participants.forEach(pId => {
+          if (pId !== user.uid) unreadUpdates[`unreadCount.${pId}`] = increment(1)
+        })
+      } else if (otherUid) {
+        unreadUpdates[`unreadCount.${otherUid}`] = increment(1)
+      }
+
+      await updateDoc(doc(db, 'chats', currentChat.id), {
+        lastMessage: '🎤 Voice message',
+        lastMessageSender: user.uid,
+        lastMessageTime: serverTimestamp(),
+        lastMessageStatus: initialStatus,
+        ...unreadUpdates,
+        [`typing.${user.uid}`]: false
+      })
+    } catch (err) {
+      console.error('Error sending voice note:', err)
+      showToast('Failed to send voice note.', 'error')
+    } finally {
+      setIsUploading(false)
+    }
+  }
+
+  // Group WebRTC Call Handler
+  const handleStartOrJoinGroupCall = async (isVideo, specificCallId = null, targetGroupChat = null) => {
+    const targetGroup = targetGroupChat || currentChat
+    if (!targetGroup) return
+
+    if (activeGroupCallSession) {
+      showToast('You are already in a group call.', 'info')
+      return
+    }
+
+    try {
+      // Only join existing call if explicitly requested by specificCallId or if there is an active call with other participants connected
+      let callIdToJoin = specificCallId || null
+      if (!callIdToJoin && currentActiveGroupCall) {
+        const hasConnectedRemote = currentActiveGroupCall.participantUids?.some(uid => uid !== user.uid)
+        if (hasConnectedRemote) {
+          callIdToJoin = currentActiveGroupCall.id
+        }
+      }
+      const isNewCall = !callIdToJoin
+      const isTargetAdmin = targetGroup.adminUids?.includes(user.uid) || targetGroup.createdBy === user.uid
+
+      if (isNewCall && targetGroup.permissions?.whoCanCall === 'admins' && !isTargetAdmin) {
+        showToast('Only group admins can start a call in this group.', 'warning')
+        return
+      }
+
+      const session = await joinGroupCall({
+        callId: callIdToJoin,
+        groupChat: targetGroup,
+        currentUser: user,
+        isVideo,
+        onLocalStream: (stream) => {
+          setActiveGroupCallSession((prev) => (prev ? { ...prev, localStream: stream } : null))
+        },
+        onRemoteStream: (remoteUid, stream) => {
+          setActiveGroupCallSession((prev) => {
+            if (!prev) return null
+            return {
+              ...prev,
+              remoteStreams: { ...(prev.remoteStreams || {}), [remoteUid]: stream }
+            }
+          })
+        },
+        onRemoteStreamRemoved: (remoteUid) => {
+          setActiveGroupCallSession((prev) => {
+            if (!prev) return null
+            const nextStreams = { ...(prev.remoteStreams || {}) }
+            delete nextStreams[remoteUid]
+            return { ...prev, remoteStreams: nextStreams }
+          })
+        },
+        onParticipantsUpdate: (participantsList) => {
+          setActiveGroupCallSession((prev) => (prev ? { ...prev, participants: participantsList } : null))
+        },
+        onCallEnd: (reason) => {
+          setActiveGroupCallSession(null)
+          if (reason === 'declined') {
+            showToast('Call was declined', 'call-declined')
+          } else if (reason === 'ended' || reason === 'participants_left') {
+            showToast('Call ended', 'info')
+          }
+        }
+      })
+
+      setActiveGroupCallSession({
+        callId: session.callId,
+        groupChat: targetGroup,
+        isHost: session.isHost,
+        localStream: session.localStream,
+        remoteStreams: session.remoteStreams || {},
+        participants: [
+          {
+            uid: user.uid,
+            name: user.displayName || user.email?.split('@')[0] || 'User',
+            photoURL: user.photoURL || null,
+            isMuted: false,
+            isCamOff: !isVideo
+          }
+        ],
+        toggleMic: session.toggleMic,
+        toggleCam: session.toggleCam,
+        toggleScreenShare: session.toggleScreenShare,
+        leaveCall: session.leaveCall,
+        endCallForEveryone: session.endCallForEveryone
+      })
+
+      if (isNewCall) {
+        addDoc(collection(db, 'messages'), {
+          chatId: targetGroup.id,
+          uid: user.uid,
+          email: user.email,
+          text: `📹 ${user.displayName || user.email?.split('@')[0]} started a group video call`,
+          isSystem: true,
+          isGroupCall: true,
+          callId: session.callId,
+          createdAt: serverTimestamp(),
+          status: 'read'
+        }).catch((err) => console.warn('Could not post call message:', err))
+
+        updateDoc(doc(db, 'chats', targetGroup.id), {
+          lastMessage: `📹 Group video call started`,
+          lastMessageSender: user.uid,
+          lastMessageTime: serverTimestamp()
+        }).catch((err) => console.warn('Could not update chat lastMessage:', err))
+      }
+    } catch (err) {
+      showToast(err.message || 'Failed to connect to group video call', 'error')
+      setActiveGroupCallSession(null)
+    }
+  }
+
+  // WebRTC Call Handlers
+  const handleStartCall = async (isVideo) => {
+    if (!currentChat) return
+    if (currentChat.type === 'group' || currentChat.isGroup) {
+      handleStartOrJoinGroupCall(isVideo)
+      return
+    }
+
+    const otherUid = currentChat.otherUid || (currentChat.participants?.find(p => p !== user.uid))
+    if (!otherUid) {
+      showToast('Cannot find contact for calling.', 'error')
+      return
+    }
+
+    const otherUser = usersMap[otherUid] || {
+      uid: otherUid,
+      username: currentChat.otherEmail?.split('@')[0] || 'Friend',
+      email: currentChat.otherEmail || '',
+      photoURL: currentChat.otherPhoto || null
+    }
+
+    try {
+      setActiveCallSession({
+        callId: null,
+        isCaller: true,
+        type: isVideo ? 'video' : 'audio',
+        otherUser,
+        localStream: null,
+        remoteStream: null,
+        status: 'ringing',
+        endCall: () => setActiveCallSession(null),
+        toggleMic: () => {},
+        toggleCam: () => {}
+      })
+
+      const session = await startCall({
+        callerUser: user,
+        calleeUid: otherUid,
+        calleeUser: otherUser,
+        chatId: currentChat.id,
+        isVideo,
+        onLocalStream: (stream) => {
+          setActiveCallSession(prev => (prev ? { ...prev, localStream: stream } : null))
+        },
+        onRemoteStream: (stream) => {
+          setActiveCallSession(prev => (prev ? { ...prev, remoteStream: stream, status: 'connected' } : null))
+        },
+        onCallConnected: () => {
+          setActiveCallSession(prev => (prev ? { ...prev, status: 'connected' } : null))
+        },
+        onCallEnd: (status) => {
+          setActiveCallSession(null)
+          if (status === 'declined') {
+            showToast('Call was declined', 'call-declined')
+          } else {
+            showToast('Call ended', 'info')
+          }
+        }
+      })
+
+      if (session.isEnded && session.isEnded()) {
+        setActiveCallSession(null)
+        return
+      }
+
+      setActiveCallSession(prev => {
+        if (!prev) return null
+        return {
+          ...prev,
+          callId: session.callId,
+          isCaller: true,
+          type: isVideo ? 'video' : 'audio',
+          otherUser,
+          localStream: session.localStream || prev.localStream || null,
+          remoteStream: prev.remoteStream || session.remoteStream || null,
+          status: prev.status === 'connected' ? 'connected' : 'ringing',
+          endCall: session.endCall,
+          toggleMic: session.toggleMic,
+          toggleCam: session.toggleCam
+        }
+      })
+    } catch (err) {
+      showToast(err.message || 'Failed to start call', 'error')
+      setActiveCallSession(null)
+    }
+  }
+
+  const handleAcceptCall = async (callData) => {
+    setIncomingCall(null)
+    if (callData.isGroup) {
+      let targetGroup = callData.groupChat || chats.find(c => c.id === callData.chatId) || (currentChat?.id === callData.chatId ? currentChat : null)
+      if (!targetGroup) {
+        targetGroup = {
+          id: callData.chatId,
+          type: 'group',
+          name: callData.groupName || 'Group',
+          photoURL: callData.groupPhoto || null,
+          participants: callData.members || []
+        }
+      }
+      setCurrentChat(targetGroup)
+      handleStartOrJoinGroupCall(callData.type === 'video', callData.id, targetGroup)
+      return
+    }
+    try {
+      const callerUserData = usersMap[callData.callerUid] || {
+        username: callData.callerName,
+        email: callData.callerEmail,
+        photoURL: callData.callerPhoto
+      }
+
+      setActiveCallSession({
+        callId: callData.id,
+        isCaller: false,
+        type: callData.type,
+        otherUser: callerUserData,
+        localStream: null,
+        remoteStream: null,
+        status: 'connected',
+        endCall: () => {
+          declineCall(callData.id)
+          setActiveCallSession(null)
+        },
+        toggleMic: () => {},
+        toggleCam: () => {}
+      })
+
+      const session = await answerCall({
+        callId: callData.id,
+        isVideo: callData.type === 'video',
+        onLocalStream: (stream) => {
+          setActiveCallSession(prev => (prev ? { ...prev, localStream: stream } : null))
+        },
+        onRemoteStream: (stream) => {
+          setActiveCallSession(prev => (prev ? { ...prev, remoteStream: stream, status: 'connected' } : null))
+        },
+        onCallEnd: (status) => {
+          setActiveCallSession(null)
+        }
+      })
+
+      if (session.isEnded && session.isEnded()) {
+        setActiveCallSession(null)
+        return
+      }
+
+      setActiveCallSession(prev => {
+        if (!prev) return null
+        return {
+          ...prev,
+          callId: session.callId,
+          isCaller: false,
+          type: callData.type,
+          otherUser: callerUserData,
+          localStream: session.localStream || prev.localStream || null,
+          remoteStream: prev.remoteStream || session.remoteStream || null,
+          status: 'connected',
+          endCall: session.endCall,
+          toggleMic: session.toggleMic,
+          toggleCam: session.toggleCam
+        }
+      })
+    } catch (err) {
+      showToast(err.message || 'Failed to answer call', 'error')
+      setActiveCallSession(null)
+    }
+  }
+
+  const handleDeclineCall = async (callId) => {
+    if (callId) {
+      dismissedCallsRef.current.add(callId)
+    }
+    if (incomingCall?.isGroup) {
+      try {
+        const callRef = doc(db, 'groupCalls', callId)
+        const callSnap = await getDoc(callRef)
+        if (callSnap.exists()) {
+          const callData = callSnap.data()
+          const currentDeclined = callData.declinedUids || []
+          const updatedDeclined = [...new Set([...currentDeclined, user.uid])]
+          const members = callData.members || []
+          const otherMembers = members.filter((uid) => uid !== callData.hostUid)
+          const allDeclined = otherMembers.length > 0 && otherMembers.every((uid) => updatedDeclined.includes(uid))
+
+          await updateDoc(callRef, {
+            declinedUids: arrayUnion(user.uid),
+            ...(allDeclined ? {
+              status: 'ended',
+              endedAt: serverTimestamp(),
+              endReason: 'declined',
+              participantUids: []
+            } : {})
+          })
+        } else {
+          await updateDoc(callRef, {
+            declinedUids: arrayUnion(user.uid)
+          })
+        }
+      } catch (e) {
+        console.warn('Error recording group call decline:', e)
+      }
+      setIncomingCall(null)
+      return
+    }
+    await declineCall(callId)
+    setIncomingCall(null)
   }
 
   // Delete & Multi-Select Handlers
@@ -1819,6 +2647,10 @@ export default function ChatLayout({ user }) {
   const activeChatDoc = chats.find(c => c.id === currentChat?.id)
   const isOtherTyping = Boolean(currentChat && activeChatDoc?.typing?.[currentChat.otherUid])
 
+  const currentActiveGroupCall = (currentChat?.type === 'group' || currentChat?.isGroup)
+    ? (activeGroupCallForChat || (currentChat?.id ? activeGroupCalls[currentChat.id] : null))
+    : null
+
   useEffect(() => {
     if (isOtherTyping && messageStreamRef.current) {
       messageStreamRef.current.scrollTop = messageStreamRef.current.scrollHeight
@@ -1827,7 +2659,35 @@ export default function ChatLayout({ user }) {
 
   return (
     <div className={`layout-container ${currentChat ? 'chat-active' : ''}`} data-theme={activeDocumentTheme}>
-      {/* Floating In-App Toast Notification */}
+      {/* Floating In-App Webpage Toast Notification (In-DOM top notification) */}
+      {toast && (
+        <div className={`app-web-toast toast-${toast.type}`} role="status" aria-live="polite">
+          <div className="toast-icon-wrap">
+            {toast.type === 'call-declined' ? (
+              <PhoneOff size={18} />
+            ) : toast.type === 'error' ? (
+              <AlertCircle size={18} />
+            ) : toast.type === 'warning' ? (
+              <AlertTriangle size={18} />
+            ) : toast.type === 'success' ? (
+              <CheckCircle2 size={18} />
+            ) : (
+              <Info size={18} />
+            )}
+          </div>
+          <span className="toast-text">{toast.message}</span>
+          <button
+            type="button"
+            className="toast-dismiss-btn"
+            onClick={() => setToast(null)}
+            title="Dismiss notification"
+          >
+            <X size={15} />
+          </button>
+        </div>
+      )}
+
+      {/* Floating In-App Message Toast Notification */}
       {inAppToast && (
         <div 
           className="notification-toast"
@@ -1921,7 +2781,7 @@ export default function ChatLayout({ user }) {
             <Search size={16} />
             <input
               type="text"
-              placeholder="Search users..."
+              placeholder="Search by username..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
@@ -1939,6 +2799,7 @@ export default function ChatLayout({ user }) {
                   const isSelf = result.uid === user.uid;
                   const isFriend = chats.some(c => c.otherUid === result.uid);
                   const resultPhoto = usersMap[result.uid]?.photoURL;
+                  const displayUsername = result.username || result.email?.split('@')[0] || 'user';
                   return (
                     <li key={result.uid} className="search-result-item">
                       <div className="search-result-info">
@@ -1954,7 +2815,7 @@ export default function ChatLayout({ user }) {
                             title={isUserOnline(usersMap[result.uid]) ? 'Online' : 'Offline'}
                           ></div>
                         </div>
-                        <span className="search-result-email">{result.email} {isSelf && "(You)"}</span>
+                        <span className="search-result-email">@{displayUsername} {isSelf && "(You)"}</span>
                         {isUserOnline(usersMap[result.uid]) && !isSelf && (
                           <span style={{ fontSize: '0.72rem', color: 'var(--color-green)', fontWeight: '600', marginLeft: '0.5rem' }}>• Online</span>
                         )}
@@ -2006,8 +2867,8 @@ export default function ChatLayout({ user }) {
                           <div className="search-result-avatar">
                             {usersMap[req.from]?.photoURL ? <img src={usersMap[req.from].photoURL} alt="Avatar" className="avatar-img" /> : <User size={14} />}
                           </div>
-                          <span className="request-email search-result-email" title={usersMap[req.from]?.username || req.fromEmail}>
-                            {usersMap[req.from]?.username || req.fromEmail}
+                          <span className="request-email search-result-email" title={`@${usersMap[req.from]?.username || req.fromEmail?.split('@')[0] || 'user'}`}>
+                            @{usersMap[req.from]?.username || req.fromEmail?.split('@')[0] || 'user'}
                           </span>
                         </div>
                         <div className="request-actions">
@@ -2025,17 +2886,39 @@ export default function ChatLayout({ user }) {
               </div>
             )}
 
-            {/* Direct Messages / Friends */}
-            <div className="channel-section-header" style={{ marginTop: incomingRequests.length > 0 ? '1rem' : '0' }}>
-              <span>Friends</span>
+            {/* Direct Messages & Groups */}
+            <div className="channel-section-header" style={{ marginTop: incomingRequests.length > 0 ? '1rem' : '0', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <span>Chats & Groups</span>
+              <button
+                type="button"
+                className="btn-new-group-trigger"
+                onClick={() => setShowCreateGroupModal(true)}
+                title="Create New Group"
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  cursor: 'pointer',
+                  color: 'var(--color-primary)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 4,
+                  fontSize: '0.75rem',
+                  fontWeight: 600
+                }}
+              >
+                <Users size={14} /> + Group
+              </button>
             </div>
             <ul className="channel-list">
               {chats.length === 0 && (
-                <div className="search-empty" style={{ padding: '0.5rem' }}>No friends yet. Search and add someone!</div>
+                <div className="search-empty" style={{ padding: '0.5rem' }}>No chats yet. Search someone or create a group!</div>
               )}
               {chats.map(chat => {
                 const unreadCount = chat.unreadCount?.[user.uid] || 0;
-                const friendPhoto = usersMap[chat.otherUid]?.photoURL;
+                const isGroup = chat.type === 'group';
+                const friendPhoto = isGroup ? chat.photoURL : usersMap[chat.otherUid]?.photoURL;
+                const chatTitle = isGroup ? (chat.name || 'Group') : (usersMap[chat.otherUid]?.username || chat.otherEmail?.split('@')[0] || 'Chat');
+
                 return (
                   <li
                     key={chat.id}
@@ -2045,15 +2928,30 @@ export default function ChatLayout({ user }) {
                     <div className="dm-item-content">
                       <div className="dm-item-top">
                         <div className="avatar dm-avatar">
-                          {friendPhoto ? <img src={friendPhoto} alt="Avatar" className="avatar-img" /> : <User size={14} />}
-                          <div 
-                            className={`status-indicator ${isUserOnline(usersMap[chat.otherUid]) ? 'online' : ''}`}
-                            title={isUserOnline(usersMap[chat.otherUid]) ? 'Online' : 'Offline'}
-                          ></div>
+                          {friendPhoto ? (
+                            <img src={friendPhoto} alt="Avatar" className="avatar-img" />
+                          ) : isGroup ? (
+                            <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--color-primary-light)', color: 'var(--color-primary)', borderRadius: '50%' }}>
+                              <Users size={14} />
+                            </div>
+                          ) : (
+                            <User size={14} />
+                          )}
+                          {!isGroup && (
+                            <div 
+                              className={`status-indicator ${isUserOnline(usersMap[chat.otherUid]) ? 'online' : ''}`}
+                              title={isUserOnline(usersMap[chat.otherUid]) ? 'Online' : 'Offline'}
+                            ></div>
+                          )}
                         </div>
-                        <span className="dm-email" title={usersMap[chat.otherUid]?.username || chat.otherEmail}>
-                          {usersMap[chat.otherUid]?.username || chat.otherEmail}
+                        <span className="dm-email" title={chatTitle}>
+                          {chatTitle}
                         </span>
+                        {activeGroupCalls[chat.id] && (
+                          <span className="live-call-badge" style={{ fontSize: '0.62rem', padding: '1px 6px', marginLeft: '0.35rem' }}>
+                            <span className="live-dot" /> LIVE
+                          </span>
+                        )}
                         {isChatMuted(chat.id) && (
                           <BellOff size={13} style={{ color: 'var(--color-text-muted)', marginLeft: '0.35rem', flexShrink: 0 }} title="Notifications muted for this chat" />
                         )}
@@ -2120,7 +3018,7 @@ export default function ChatLayout({ user }) {
               <div className="status-indicator online"></div>
             </div>
             <div className="user-details">
-              <span className="user-name">{usersMap[user.uid]?.username || user.email.split('@')[0]}</span>
+              <span className="user-name">{usersMap[user.uid]?.username || user.email?.split('@')[0] || 'You'}</span>
               <span className="user-status">Online</span>
             </div>
           </div>
@@ -2187,21 +3085,41 @@ export default function ChatLayout({ user }) {
                     <button className="mobile-back-btn" onClick={() => setCurrentChat(null)}>
                       <ChevronLeft size={24} />
                     </button>
-                    <div className="chat-header-avatar" onClick={() => setViewProfileUser(usersMap[currentChat.otherUid])} style={{ cursor: 'pointer' }}>
-                      {usersMap[currentChat.otherUid]?.photoURL ? (
-                        <img src={usersMap[currentChat.otherUid].photoURL} alt="Avatar" className="avatar-img" />
-                      ) : (
-                        <User size={24} style={{ color: 'var(--color-outline)' }} />
-                      )}
-                      <div 
-                        className={`status-indicator ${isUserOnline(usersMap[currentChat.otherUid]) ? 'online' : ''}`}
-                        title={isUserOnline(usersMap[currentChat.otherUid]) ? 'Online' : 'Offline'}
-                      ></div>
-                    </div>
-                    <div onClick={() => setViewProfileUser(usersMap[currentChat.otherUid])} style={{ cursor: 'pointer' }}>
-                      <h1 className="channel-title">{usersMap[currentChat.otherUid]?.username || currentChat.otherEmail.split('@')[0]}</h1>
+                    {currentChat.type === 'group' ? (
+                      <div className="chat-header-avatar" onClick={() => setShowGroupInfoModal(true)} style={{ cursor: 'pointer' }}>
+                        <div style={{ width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--color-primary-light)', color: 'var(--color-primary)', borderRadius: '50%' }}>
+                          <Users size={22} />
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="chat-header-avatar" onClick={() => setViewProfileUser(usersMap[currentChat.otherUid])} style={{ cursor: 'pointer' }}>
+                        {usersMap[currentChat.otherUid]?.photoURL ? (
+                          <img src={usersMap[currentChat.otherUid].photoURL} alt="Avatar" className="avatar-img" />
+                        ) : (
+                          <User size={24} style={{ color: 'var(--color-outline)' }} />
+                        )}
+                        <div 
+                          className={`status-indicator ${isUserOnline(usersMap[currentChat.otherUid]) ? 'online' : ''}`}
+                          title={isUserOnline(usersMap[currentChat.otherUid]) ? 'Online' : 'Offline'}
+                        ></div>
+                      </div>
+                    )}
+
+                    <div onClick={() => (currentChat.type === 'group' || currentChat.isGroup) ? setShowGroupInfoModal(true) : setViewProfileUser(usersMap[currentChat.otherUid])} style={{ cursor: 'pointer' }}>
+                      <div style={{ display: 'flex', alignItems: 'center' }}>
+                        <h1 className="channel-title">
+                          {(currentChat.type === 'group' || currentChat.isGroup) ? (currentChat.name || 'Group') : (usersMap[currentChat.otherUid]?.username || currentChat.otherEmail?.split('@')[0] || 'Chat')}
+                        </h1>
+                        <span className="e2ee-lock-pill" title="Secured with End-to-End Encryption">
+                          <Lock size={11} /> E2EE
+                        </span>
+                      </div>
                       <p className="channel-topic" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
-                        {isOtherTyping ? (
+                        {(currentChat.type === 'group' || currentChat.isGroup) ? (
+                          <span style={{ color: 'var(--color-text-muted)' }}>
+                            {currentChat.participants?.length || 0} members • Tap for info
+                          </span>
+                        ) : isOtherTyping ? (
                           <span style={{ color: 'var(--color-green)', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '0.2rem' }}>
                             typing
                             <span className="typing-dots-header">
@@ -2223,11 +3141,151 @@ export default function ChatLayout({ user }) {
                       </p>
                     </div>
                   </div>
-                  <div className="chat-header-right" style={{ display: 'flex', alignItems: 'center', position: 'relative' }} ref={chatMenuRef}>
+                  <div className="chat-header-right" style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', position: 'relative' }} ref={chatMenuRef}>
+                    {/* Call Buttons for 1-on-1 */}
+                    {currentChat.type !== 'group' && (
+                      <>
+                        <button
+                          type="button"
+                          className="action-icon"
+                          onClick={() => handleStartCall(false)}
+                          title="Voice Call"
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            borderRadius: '50%',
+                            width: '36px',
+                            height: '36px',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'var(--color-text-main)',
+                            transition: 'all 0.15s ease'
+                          }}
+                        >
+                          <Phone size={19} />
+                        </button>
+                        <button
+                          type="button"
+                          className="action-icon"
+                          onClick={() => handleStartCall(true)}
+                          title="Video Call"
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            borderRadius: '50%',
+                            width: '36px',
+                            height: '36px',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'var(--color-text-main)',
+                            transition: 'all 0.15s ease'
+                          }}
+                        >
+                          <Video size={19} />
+                        </button>
+                      </>
+                    )}
+
+                    {(currentChat.type === 'group' || currentChat.isGroup) && (
+                      <>
+                        <button
+                          type="button"
+                          className={`action-icon ${currentActiveGroupCall ? 'active-call-pulse' : ''}`}
+                          onClick={() => {
+                            if (!currentActiveGroupCall && !canStartCallInGroup) {
+                              showToast('Only group admins can start calls in this group.', 'warning')
+                              return
+                            }
+                            handleStartOrJoinGroupCall(true, currentActiveGroupCall?.id)
+                          }}
+                          title={
+                            currentActiveGroupCall
+                              ? 'Pick Call / Join Active Group Video Call'
+                              : (!canStartCallInGroup ? 'Only group admins can start calls' : 'Start Group Video Call')
+                          }
+                          style={{
+                            background: currentActiveGroupCall ? 'rgba(16, 185, 129, 0.2)' : 'transparent',
+                            border: currentActiveGroupCall ? '1.5px solid #10b981' : 'none',
+                            borderRadius: '50%',
+                            width: '36px',
+                            height: '36px',
+                            cursor: (!currentActiveGroupCall && !canStartCallInGroup) ? 'not-allowed' : 'pointer',
+                            opacity: (!currentActiveGroupCall && !canStartCallInGroup) ? 0.45 : 1,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: currentActiveGroupCall ? '#10b981' : 'var(--color-text-main)',
+                            transition: 'all 0.15s ease',
+                            position: 'relative'
+                          }}
+                        >
+                          <Video size={19} />
+                          {currentActiveGroupCall && <span className="call-live-indicator-dot" />}
+                        </button>
+                        <button
+                          type="button"
+                          className="action-icon"
+                          onClick={() => {
+                            if (!currentActiveGroupCall && !canStartCallInGroup) {
+                              showToast('Only group admins can start calls in this group.', 'warning')
+                              return
+                            }
+                            handleStartOrJoinGroupCall(false, currentActiveGroupCall?.id)
+                          }}
+                          title={
+                            currentActiveGroupCall
+                              ? 'Pick Call / Join Active Group Voice Call'
+                              : (!canStartCallInGroup ? 'Only group admins can start calls' : 'Start Group Voice Call')
+                          }
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            borderRadius: '50%',
+                            width: '36px',
+                            height: '36px',
+                            cursor: (!currentActiveGroupCall && !canStartCallInGroup) ? 'not-allowed' : 'pointer',
+                            opacity: (!currentActiveGroupCall && !canStartCallInGroup) ? 0.45 : 1,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'var(--color-text-main)',
+                            transition: 'all 0.15s ease'
+                          }}
+                        >
+                          <Phone size={19} />
+                        </button>
+                        <button
+                          type="button"
+                          className="action-icon"
+                          onClick={() => setShowGroupInfoModal(true)}
+                          title="Group Info"
+                          style={{
+                            background: 'transparent',
+                            border: 'none',
+                            borderRadius: '50%',
+                            width: '36px',
+                            height: '36px',
+                            cursor: 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'var(--color-text-main)',
+                            transition: 'all 0.15s ease'
+                          }}
+                        >
+                          <Info size={19} />
+                        </button>
+                      </>
+                    )}
+
                     {isChatMuted(currentChat.id) && (
                       <span 
                         title="Notifications muted for this chat"
-                        style={{ display: 'flex', alignItems: 'center', color: 'var(--color-red)', marginRight: '0.35rem', opacity: 0.85 }}
+                        style={{ display: 'flex', alignItems: 'center', color: 'var(--color-red)', marginRight: '0.15rem', opacity: 0.85 }}
                       >
                         <BellOff size={18} />
                       </span>
@@ -2351,6 +3409,27 @@ export default function ChatLayout({ user }) {
               )}
             </header>
 
+            {/* Active Group Call Banner */}
+            {currentActiveGroupCall && (!activeGroupCallSession || activeGroupCallSession.callId !== currentActiveGroupCall.id) && (
+              <div className="group-call-active-banner">
+                <div className="group-call-banner-left">
+                  <span className="live-call-badge">
+                    <span className="live-dot" /> LIVE
+                  </span>
+                  <span className="group-call-banner-text">
+                    Group Video Call in progress ({currentActiveGroupCall.participantUids?.length || 1} connected)
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="btn-join-group-call"
+                  onClick={() => handleStartOrJoinGroupCall(true, currentActiveGroupCall.id)}
+                >
+                  <PhoneCall size={16} /> Pick Call / Join
+                </button>
+              </div>
+            )}
+
             <div 
               className="message-stream" 
               ref={messageStreamRef}
@@ -2366,16 +3445,24 @@ export default function ChatLayout({ user }) {
               <div className="message-stream-inner">
                 {messages.length === 0 && (
                   <div className="empty-state">
-                    <p>No messages yet. Say hello to {usersMap[currentChat.otherUid]?.username || currentChat.otherEmail.split('@')[0]}!</p>
+                    <p>
+                      {(currentChat.type === 'group' || currentChat.isGroup)
+                        ? 'No messages yet in this group. Say hello to everyone!'
+                        : `No messages yet. Say hello to ${usersMap[currentChat.otherUid]?.username || currentChat.otherEmail?.split('@')[0] || 'your friend'}!`}
+                    </p>
                   </div>
                 )}
 
                 {messages.map((msg, idx) => {
                   const isMe = msg.uid === user.uid
+                  const isGroup = currentChat.type === 'group'
                   const showHeader = idx === 0 || messages[idx - 1].uid !== msg.uid
                   const senderPhoto = usersMap[msg.uid]?.photoURL
                   const msgStatus = isMe ? getMessageStatus(msg, usersMap[currentChat.otherUid]) : null
                   const isSelected = selectedMsgIds.has(msg.id)
+
+                  const effectiveText = (msg.isEncrypted && decryptedMap[msg.id]?.text) ? decryptedMap[msg.id].text : msg.text
+                  const effectiveFileUrl = (msg.isEncrypted && decryptedMap[msg.id]?.fileUrl) ? decryptedMap[msg.id].fileUrl : msg.fileUrl
 
                   return (
                     <div 
@@ -2404,17 +3491,24 @@ export default function ChatLayout({ user }) {
                         <div className="message-content">
                           <div 
                             className={`message-bubble ${isMe ? 'bubble-mine' : 'bubble-theirs'} ${isSelectMode ? 'selectable' : ''} ${isSelected ? 'selected' : ''}`}
-                            onClick={() => {
-                              if (isSelectMode) {
-                                handleToggleSelectMessage(msg.id)
-                              } else {
-                                setMessageReadInfo({ ...msg, computedStatus: isMe ? msgStatus : 'received' })
-                              }
-                            }}
-                            title={isSelectMode ? 'Click to select' : 'Tap to view message info'}
+                            onClick={() => handleMessageBubbleClick(msg, isMe ? msgStatus : 'received')}
+                            onDoubleClick={() => handleMessageBubbleDoubleClick(msg, isMe ? msgStatus : 'received')}
+                            title={isSelectMode ? 'Click to select' : 'Double tap to view message info'}
                           >
+                            {/* Group Sender Label */}
+                            {isGroup && !isMe && showHeader && (
+                              <div style={{ fontSize: '0.74rem', fontWeight: 700, color: 'var(--color-primary)', marginBottom: 3 }}>
+                                {usersMap[msg.uid]?.username || msg.email?.split('@')[0]}
+                              </div>
+                            )}
+
+                            {/* Voice Audio Message */}
+                            {msg.isAudio && effectiveFileUrl && (
+                              <AudioMessageBubble audioUrl={effectiveFileUrl} duration={msg.duration} isMine={isMe} />
+                            )}
+
                             {/* Photo Attachment */}
-                            {msg.fileUrl && (msg.fileType?.startsWith('image/') || msg.isImage) && (
+                            {!msg.isAudio && effectiveFileUrl && (msg.fileType?.startsWith('image/') || msg.isImage) && (
                               <div 
                                 className="bubble-image-wrapper"
                                 onClick={(e) => {
@@ -2423,17 +3517,17 @@ export default function ChatLayout({ user }) {
                                     handleToggleSelectMessage(msg.id)
                                   } else {
                                     e.stopPropagation()
-                                    setActiveLightbox({ url: msg.fileUrl, name: msg.fileName || 'Photo' })
+                                    setActiveLightbox({ url: effectiveFileUrl, name: msg.fileName || 'Photo' })
                                   }
                                 }}
                                 title={isSelectMode ? 'Click to select' : 'Click to view full photo'}
                               >
-                                <img src={msg.fileUrl} alt={msg.fileName || 'Photo'} className="bubble-image" loading="lazy" />
+                                <img src={effectiveFileUrl} alt={msg.fileName || 'Photo'} className="bubble-image" loading="lazy" />
                               </div>
                             )}
 
                             {/* Document Attachment */}
-                            {msg.fileUrl && !(msg.fileType?.startsWith('image/') || msg.isImage) && (
+                            {!msg.isAudio && effectiveFileUrl && !(msg.fileType?.startsWith('image/') || msg.isImage) && (
                               <div 
                                 className="bubble-file-card"
                                 onClick={(e) => {
@@ -2452,7 +3546,7 @@ export default function ChatLayout({ user }) {
                                 </div>
                                 {!isSelectMode && (
                                   <a 
-                                    href={msg.fileUrl} 
+                                    href={effectiveFileUrl} 
                                     download={msg.fileName || 'file'} 
                                     target="_blank" 
                                     rel="noopener noreferrer" 
@@ -2465,13 +3559,62 @@ export default function ChatLayout({ user }) {
                               </div>
                             )}
 
+                            {/* Group Video Call Message Card */}
+                            {(msg.isGroupCall || (msg.isSystem && (
+                              (typeof effectiveText === 'string' && (effectiveText.includes('group video call') || effectiveText.includes('started a group video call'))) ||
+                              (typeof msg.text === 'string' && (msg.text.includes('group video call') || msg.text.includes('started a group video call')))
+                            ))) && (() => {
+                              const isCallActive = Boolean(
+                                currentActiveGroupCall &&
+                                ((msg.callId && currentActiveGroupCall.id === msg.callId) ||
+                                 (!msg.callId && currentActiveGroupCall.chatId === currentChat.id))
+                              )
+                              return (
+                                <div className={`group-call-message-card ${!isCallActive ? 'ended' : ''}`}>
+                                  <div className={`group-call-icon-wrap ${!isCallActive ? 'ended' : ''}`}>
+                                    {isCallActive ? <Video size={18} color="#fff" /> : <PhoneOff size={16} />}
+                                  </div>
+                                  <div className="group-call-card-info">
+                                    <span className="group-call-title">Group Video Call</span>
+                                    <span className="group-call-subtitle">
+                                      {isCallActive ? (effectiveText || msg.text || 'Group video call in progress') : 'Call ended'}
+                                    </span>
+                                  </div>
+                                  {isCallActive ? (
+                                    <button
+                                      type="button"
+                                      className="group-call-join-btn"
+                                      onClick={(e) => {
+                                        e.stopPropagation()
+                                        handleStartOrJoinGroupCall(true, msg.callId || currentActiveGroupCall?.id)
+                                      }}
+                                    >
+                                      <PhoneCall size={13} style={{ marginRight: 4 }} /> Pick Call / Join
+                                    </button>
+                                  ) : (
+                                    <span className="group-call-ended-pill">
+                                      <PhoneOff size={12} style={{ marginRight: 4 }} /> Ended
+                                    </span>
+                                  )}
+                                </div>
+                              )
+                            })()}
+
                             {/* Message Text / Caption */}
-                            {msg.text && (
-                              <span className="bubble-text">{msg.text}</span>
+                            {!msg.isAudio && !msg.isGroupCall && !(msg.isSystem && (
+                              (typeof effectiveText === 'string' && (effectiveText.includes('group video call') || effectiveText.includes('started a group video call'))) ||
+                              (typeof msg.text === 'string' && (msg.text.includes('group video call') || msg.text.includes('started a group video call')))
+                            )) && effectiveText && (
+                              <span className="bubble-text">{effectiveText}</span>
                             )}
 
-                            {isMe && (
-                              <span className="bubble-meta">
+                            <span className="bubble-meta" style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
+                              {msg.isEncrypted && (
+                                <span title="End-to-End Encrypted" style={{ opacity: 0.65, display: 'inline-flex', alignItems: 'center' }}>
+                                  <Lock size={11} />
+                                </span>
+                              )}
+                              {isMe && (
                                 <span className={`msg-tick tick-${msgStatus}`}>
                                   {msgStatus === 'read' ? (
                                     <CheckCheck size={15} className="tick-icon tick-read" color="#53bdeb" />
@@ -2481,8 +3624,8 @@ export default function ChatLayout({ user }) {
                                     <Check size={15} className="tick-icon tick-sent" color="#8696a0" />
                                   )}
                                 </span>
-                              </span>
-                            )}
+                              )}
+                            </span>
                           </div>
                         </div>
 
@@ -2568,61 +3711,94 @@ export default function ChatLayout({ user }) {
                   style={{ display: 'none' }}
                 />
 
-                {/* Attachment Action Buttons */}
-                <button
-                  type="button"
-                  className="attach-btn"
-                  onClick={() => imageInputRef.current?.click()}
-                  title="Send Photo"
-                  disabled={isUploading}
-                >
-                  <ImageIcon size={20} />
-                </button>
-                <button
-                  type="button"
-                  className="attach-btn"
-                  onClick={() => fileInputRef.current?.click()}
-                  title="Send Document / File"
-                  disabled={isUploading}
-                >
-                  <Paperclip size={20} />
-                </button>
+                {!canSendInGroup ? (
+                  <div className="group-restricted-input-bar">
+                    <Lock size={16} className="restricted-icon" />
+                    <span>Only group admins can send messages in this group</span>
+                  </div>
+                ) : isRecordingVoice ? (
+                  <VoiceRecorder
+                    onSendAudio={handleSendVoiceNote}
+                    onCancel={() => setIsRecordingVoice(false)}
+                    onError={(msg) => showToast(msg, 'error')}
+                  />
+                ) : (
+                  <>
+                    {/* Attachment Action Buttons */}
+                    <button
+                      type="button"
+                      className="attach-btn"
+                      onClick={() => imageInputRef.current?.click()}
+                      title="Send Photo"
+                      disabled={isUploading}
+                    >
+                      <ImageIcon size={20} />
+                    </button>
+                    <button
+                      type="button"
+                      className="attach-btn"
+                      onClick={() => fileInputRef.current?.click()}
+                      title="Send Document / File"
+                      disabled={isUploading}
+                    >
+                      <Paperclip size={20} />
+                    </button>
 
-                <input
-                  ref={chatInputRef}
-                  type="text"
-                  className="chat-input"
-                  value={newMessage}
-                  onChange={handleInputChange}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault()
-                      handleSend(e)
-                    }
-                  }}
-                  placeholder={stagedAttachment ? "Add a caption..." : `Message ${usersMap[currentChat.otherUid]?.username || currentChat.otherEmail.split('@')[0]}...`}
-                  disabled={isUploading}
-                />
-                <button 
-                  type="submit" 
-                  className={`send-btn ${(newMessage.trim() || stagedAttachment) && !isUploading ? 'active' : ''}`} 
-                  style={{ width: 'auto', padding: '0 1rem', gap: '0.5rem' }}
-                  disabled={isUploading || (!newMessage.trim() && !stagedAttachment)}
-                  onMouseDown={e => e.preventDefault()}
-                  onTouchStart={e => e.preventDefault()}
-                >
-                  {isUploading ? (
-                    <>
-                      <Loader2 size={16} className="animate-spin" />
-                      <span style={{ fontWeight: '600', fontSize: '0.9rem' }}>Sending...</span>
-                    </>
-                  ) : (
-                    <>
-                      <span style={{ fontWeight: '600', fontSize: '0.9rem' }}>Send</span>
-                      <Send size={16} />
-                    </>
-                  )}
-                </button>
+                    <input
+                      ref={chatInputRef}
+                      type="text"
+                      className="chat-input"
+                      value={newMessage}
+                      onChange={handleInputChange}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault()
+                          handleSend(e)
+                        }
+                      }}
+                      placeholder={
+                        stagedAttachment
+                          ? "Add a caption..."
+                          : `Message ${(currentChat.type === 'group' || currentChat.isGroup) ? (currentChat.name || 'Group') : (usersMap[currentChat.otherUid]?.username || currentChat.otherEmail?.split('@')[0] || 'Chat')}...`
+                      }
+                      disabled={isUploading}
+                    />
+
+                    {!(newMessage.trim() || stagedAttachment) ? (
+                      <button
+                        type="button"
+                        className="attach-btn"
+                        onClick={() => setIsRecordingVoice(true)}
+                        title="Record Voice Note"
+                        style={{ color: 'var(--color-primary)' }}
+                        disabled={isUploading}
+                      >
+                        <Mic size={20} />
+                      </button>
+                    ) : (
+                      <button 
+                        type="submit" 
+                        className={`send-btn active`} 
+                        style={{ width: 'auto', padding: '0 1rem', gap: '0.5rem' }}
+                        disabled={isUploading}
+                        onMouseDown={e => e.preventDefault()}
+                        onTouchStart={e => e.preventDefault()}
+                      >
+                        {isUploading ? (
+                          <>
+                            <Loader2 size={16} className="animate-spin" />
+                            <span style={{ fontWeight: '600', fontSize: '0.9rem' }}>Sending...</span>
+                          </>
+                        ) : (
+                          <>
+                            <span style={{ fontWeight: '600', fontSize: '0.9rem' }}>Send</span>
+                            <Send size={16} />
+                          </>
+                        )}
+                      </button>
+                    )}
+                  </>
+                )}
               </form>
             </div>
           </>
@@ -2764,7 +3940,7 @@ export default function ChatLayout({ user }) {
 
               {/* Username / Name */}
               <h3 className="friend-profile-name">
-                {viewProfileUser.username || viewProfileUser.email.split('@')[0]}
+                {viewProfileUser.username || viewProfileUser.email?.split('@')[0] || 'User'}
               </h3>
 
               {/* Online / Last Seen Pill */}
@@ -2781,27 +3957,26 @@ export default function ChatLayout({ user }) {
 
               {/* Detail Items */}
               <div className="friend-profile-details">
-                {/* Email Section */}
+                {/* Username Section */}
                 <div className="friend-profile-item">
                   <div className="friend-profile-item-label">
-                    <Mail size={13} />
-                    <span>Email Address</span>
+                    <User size={13} />
+                    <span>Username</span>
                   </div>
                   <div className="friend-profile-email-row">
-                    <span className="friend-profile-item-value" style={{ fontWeight: '500' }}>
-                      {viewProfileUser.email}
+                    <span className="friend-profile-item-value" style={{ fontWeight: '600', color: 'var(--color-primary)' }}>
+                      @{viewProfileUser.username || viewProfileUser.email?.split('@')[0] || 'user'}
                     </span>
                     <button
                       type="button"
                       className="friend-profile-copy-btn"
                       onClick={() => {
-                        if (viewProfileUser.email) {
-                          navigator.clipboard.writeText(viewProfileUser.email)
-                          setCopiedEmail(true)
-                          setTimeout(() => setCopiedEmail(false), 2000)
-                        }
+                        const uname = viewProfileUser.username || viewProfileUser.email?.split('@')[0] || 'user'
+                        navigator.clipboard.writeText(`@${uname}`)
+                        setCopiedEmail(true)
+                        setTimeout(() => setCopiedEmail(false), 2000)
                       }}
-                      title="Copy Email"
+                      title="Copy Username"
                     >
                       {copiedEmail ? (
                         <>
@@ -3053,7 +4228,7 @@ export default function ChatLayout({ user }) {
 
             {deleteModal.type === 'unfriend' && (
               <p style={{ color: 'var(--color-text-secondary)', fontSize: '0.88rem', lineHeight: '1.45', marginBottom: '1.25rem' }}>
-                Are you sure you want to unfriend <strong>{usersMap[deleteModal.user?.uid]?.username || deleteModal.user?.email}</strong>? Your chat conversation with this person will be removed.
+                Are you sure you want to unfriend <strong>@{usersMap[deleteModal.user?.uid]?.username || deleteModal.user?.username || deleteModal.user?.email?.split('@')[0] || 'user'}</strong>? Your chat conversation with this person will be removed.
               </p>
             )}
 
@@ -3561,6 +4736,71 @@ export default function ChatLayout({ user }) {
             onClick={(e) => e.stopPropagation()} 
           />
         </div>
+      )}
+
+      {/* Incoming WebRTC Call Dialog */}
+      {incomingCall && (
+        <IncomingCallDialog
+          incomingCall={incomingCall}
+          onAccept={handleAcceptCall}
+          onDecline={handleDeclineCall}
+        />
+      )}
+
+      {/* Active WebRTC Call Session Modal */}
+      {activeCallSession && (
+        <CallModal
+          callSession={activeCallSession}
+          onClose={() => setActiveCallSession(null)}
+        />
+      )}
+
+      {/* Active Multi-Party Group Video Call Modal */}
+      {activeGroupCallSession && (
+        <GroupCallModal
+          groupChat={activeGroupCallSession.groupChat}
+          callSession={activeGroupCallSession}
+          currentUser={user}
+          usersMap={usersMap}
+          onClose={() => {
+            if (activeGroupCallSession?.isHost) {
+              activeGroupCallSession.endCallForEveryone()
+            } else if (activeGroupCallSession?.leaveCall) {
+              activeGroupCallSession.leaveCall()
+            }
+            setActiveGroupCallSession(null)
+          }}
+        />
+      )}
+
+      {/* Create Group Modal */}
+      {showCreateGroupModal && (
+        <CreateGroupModal
+          currentUser={user}
+          usersList={Object.values(usersMap)}
+          onClose={() => setShowCreateGroupModal(false)}
+          onGroupCreated={(newGroup) => {
+            setCurrentChat(newGroup)
+          }}
+        />
+      )}
+
+      {/* Group Info & Members Modal */}
+      {showGroupInfoModal && (
+        <GroupInfoModal
+          currentGroup={currentChat}
+          currentUser={user}
+          usersMap={usersMap}
+          showToast={showToast}
+          onClose={() => setShowGroupInfoModal(false)}
+          onStartVideoCall={() => {
+            setShowGroupInfoModal(false)
+            handleStartOrJoinGroupCall(true)
+          }}
+          onLeftGroup={() => {
+            setCurrentChat(null)
+          }}
+        />
       )}
     </div>
   )

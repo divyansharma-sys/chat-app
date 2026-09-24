@@ -16,7 +16,7 @@ export default function RightInspector() {
         </div>
         <h2 className="inspector-name">Sarah Jenkins</h2>
         <p className="inspector-role">Senior Product Designer</p>
-        <p className="inspector-email">sarah.jenkins@chatflow.io</p>
+        <p className="inspector-email">@sarahjenkins</p>
         
         <div className="inspector-time">
           🕒 11:42 AM Local time • San Francisco
