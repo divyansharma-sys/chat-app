@@ -1127,7 +1127,81 @@ body {
   }
 
   .chat-input-container {
-    padding: 0.75rem 1rem;
+    padding: 0.6rem 0.75rem max(0.6rem, env(safe-area-inset-bottom)) 0.75rem;
+  }
+
+  .sidebar-header {
+    padding-top: max(1rem, env(safe-area-inset-top));
+  }
+
+  .chat-header {
+    padding-top: max(0.6rem, env(safe-area-inset-top));
+    padding-left: max(0.6rem, env(safe-area-inset-left));
+    padding-right: max(0.6rem, env(safe-area-inset-right));
+  }
+
+  .app-web-toast {
+    top: max(16px, env(safe-area-inset-top, 16px));
+    width: calc(100vw - 32px);
+    max-width: 95vw;
+  }
+
+  /* Calling Screens Mobile Adaptation */
+  .call-modal-header,
+  .group-call-header {
+    padding-top: max(8px, env(safe-area-inset-top));
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+    height: auto;
+    min-height: 54px;
+  }
+
+  .call-controls,
+  .group-call-controls-bar {
+    bottom: max(14px, env(safe-area-inset-bottom, 14px));
+    padding: 8px 14px;
+    gap: 10px;
+    max-width: 96vw;
+  }
+
+  .control-btn,
+  .group-control-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .group-call-grid.grid-double {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr 1fr;
+  }
+
+  .group-call-grid.grid-quad {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+  }
+
+  /* Modals on mobile */
+  .modal-content,
+  .group-info-modal,
+  .create-group-modal,
+  .profile-modal {
+    width: 94vw !important;
+    max-width: 94vw !important;
+    max-height: 90dvh !important;
+    border-radius: var(--radius-lg, 16px);
+  }
+
+  /* Group Call Active Banner */
+  .group-call-active-banner {
+    padding: 8px 12px;
+    gap: 8px;
+  }
+  .group-call-banner-text {
+    font-size: 0.78rem;
+  }
+  .btn-join-group-call {
+    padding: 5px 10px;
+    font-size: 0.76rem;
   }
 
   .send-btn span {

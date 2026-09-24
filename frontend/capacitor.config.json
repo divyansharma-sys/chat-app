@@ -1,0 +1,8 @@
+{
+  "appId": "com.chatflow.app",
+  "appName": "ChatFlow",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https"
+  }
+}
