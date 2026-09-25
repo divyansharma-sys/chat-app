@@ -1,7 +1,7 @@
 import React from 'react'
 import { X, Users, Shield, LogOut, UserMinus, UserCheck, Crown, Video } from 'lucide-react'
 import { db } from '../../firebase'
-import { doc, updateDoc, arrayRemove } from 'firebase/firestore'
+import { doc, updateDoc, arrayRemove, deleteDoc } from 'firebase/firestore'
 
 export default function GroupInfoModal({
   currentGroup,
@@ -29,6 +29,23 @@ export default function GroupInfoModal({
       console.error('Error leaving group:', err)
       if (showToast) {
         showToast('Failed to leave group.', 'error')
+      }
+    }
+  }
+
+  const handleDeleteGroup = async () => {
+    if (!window.confirm('Are you absolutely sure you want to DELETE this group? This action cannot be undone.')) return
+    try {
+      await deleteDoc(doc(db, 'chats', currentGroup.id))
+      onClose()
+      if (onLeftGroup) onLeftGroup(currentGroup.id) // reusing onLeftGroup to clear the active chat UI
+      if (showToast) {
+        showToast('Group deleted successfully.', 'success')
+      }
+    } catch (err) {
+      console.error('Error deleting group:', err)
+      if (showToast) {
+        showToast('Failed to delete group.', 'error')
       }
     }
   }
@@ -232,10 +249,21 @@ export default function GroupInfoModal({
           </div>
         </div>
 
-        <div className="modal-actions group-info-actions">
+        <div className="modal-actions group-info-actions" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <button type="button" className="btn-leave-group" onClick={handleLeaveGroup}>
             <LogOut size={16} /> Leave Group
           </button>
+          
+          {isAdmin && (
+            <button 
+              type="button" 
+              className="btn-leave-group" 
+              onClick={handleDeleteGroup}
+              style={{ background: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.3)' }}
+            >
+              <X size={16} /> Delete Group
+            </button>
+          )}
         </div>
       </div>
     </div>
