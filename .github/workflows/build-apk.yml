@@ -50,7 +50,11 @@ jobs:
 
       - name: Copy Web Assets to Android
         working-directory: ./frontend
-        run: npx cap copy android
+        run: |
+          mkdir -p ./android/app/src/main/assets/public
+          cp -r dist/* ./android/app/src/main/assets/public/
+          cp capacitor.config.json ./android/app/src/main/assets/
+          echo "Web assets copied successfully into Android app assets."
 
       - name: Build Debug APK with Gradle
         working-directory: ./frontend/android
