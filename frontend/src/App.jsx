@@ -3,6 +3,7 @@ import { auth } from './firebase'
 import { onAuthStateChanged } from 'firebase/auth'
 import AuthScreen from './components/AuthScreen'
 import ChatLayout from './components/ChatLayout'
+import InstallPrompt from './components/InstallPrompt'
 import './index.css'
 
 function App() {
@@ -25,7 +26,12 @@ function App() {
     )
   }
 
-  return user ? <ChatLayout user={user} /> : <AuthScreen />
+  return (
+    <>
+      {user ? <ChatLayout user={user} /> : <AuthScreen />}
+      <InstallPrompt />
+    </>
+  )
 }
 
 export default App
