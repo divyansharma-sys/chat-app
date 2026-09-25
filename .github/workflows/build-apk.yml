@@ -41,9 +41,12 @@ jobs:
         working-directory: ./frontend
         run: npm run build
 
-      - name: Grant Execute Permission to gradlew
+      - name: Configure Android SDK and Fix Line Endings
         working-directory: ./frontend/android
-        run: chmod +x gradlew
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          sed -i 's/\r$//' gradlew
+          chmod +x gradlew
 
       - name: Sync Capacitor to Android
         working-directory: ./frontend
