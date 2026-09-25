@@ -62,9 +62,8 @@ const InstallPrompt = () => {
       }
       setDeferredPrompt(null);
     } else {
-      // Fallback: direct to GitHub Releases or Actions for APK download
-      // Since there's no static APK link right now, redirect to the repository
-      window.open('https://github.com/divyansharma-sys/chat-app', '_blank');
+      // Fallback: direct download link from GitHub Releases
+      window.location.href = 'https://github.com/divyansharma-sys/chat-app/releases/download/latest/app-debug.apk';
       setShowPrompt(false);
     }
   };

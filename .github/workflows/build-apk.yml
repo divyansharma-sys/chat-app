@@ -83,9 +83,18 @@ jobs:
           git commit -m "build failure log" || true
           git push -f origin debug-log || true
 
-      - name: Upload Debug APK
+      - name: Upload Debug APK as Artifact
         uses: actions/upload-artifact@v4
         with:
           name: ChatFlow-Android-Debug-APK
           path: frontend/android/app/build/outputs/apk/debug/*.apk
           retention-days: 14
+
+      - name: Upload APK to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          apk_path=$(find frontend/android/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          # Try to create the release. If it exists, it will fail, which is fine.
+          gh release create latest $apk_path -t "Latest APK" -n "Latest Android APK Build" || \
+          gh release upload latest $apk_path --clobber
