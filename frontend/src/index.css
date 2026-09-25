@@ -1149,11 +1149,11 @@ body {
   /* Calling Screens Mobile Adaptation */
   .call-modal-header,
   .group-call-header {
-    padding-top: max(8px, env(safe-area-inset-top));
+    padding-top: max(32px, env(safe-area-inset-top));
     padding-left: max(12px, env(safe-area-inset-left));
     padding-right: max(12px, env(safe-area-inset-right));
     height: auto;
-    min-height: 54px;
+    min-height: 72px;
   }
 
   .call-controls,
@@ -3961,6 +3961,10 @@ body {
   font-size: 1rem;
   font-weight: 600;
   color: #f8fafc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 180px;
 }
 
 .group-call-live-pill {
