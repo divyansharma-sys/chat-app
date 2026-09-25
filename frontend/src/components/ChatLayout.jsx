@@ -13,7 +13,7 @@ import CallModal from './calls/CallModal'
 import GroupCallModal from './calls/GroupCallModal'
 import CreateGroupModal from './modals/CreateGroupModal'
 import GroupInfoModal from './modals/GroupInfoModal'
-
+import { App } from '@capacitor/app'
 export default function ChatLayout({ user }) {
   const [messages, setMessages] = useState([])
   const [newMessage, setNewMessage] = useState('')
@@ -2419,6 +2419,7 @@ export default function ChatLayout({ user }) {
 
   // Handle hardware back button (Android/iOS swipe)
   useEffect(() => {
+    // 1. Web fallback popstate
     const handlePopState = () => {
       if (isSelectMode) {
         handleExitSelectMode()
@@ -2429,7 +2430,34 @@ export default function ChatLayout({ user }) {
       }
     }
     window.addEventListener('popstate', handlePopState)
-    return () => window.removeEventListener('popstate', handlePopState)
+
+    // 2. Capacitor Native Back Button handling
+    let backButtonListener = null
+    const setupNativeBack = async () => {
+      try {
+        backButtonListener = await App.addListener('backButton', ({ canGoBack }) => {
+          if (isSelectMode) {
+            handleExitSelectMode()
+          } else if (currentChat) {
+            setCurrentChat(null)
+          } else if (canGoBack) {
+            window.history.back()
+          } else {
+            App.exitApp()
+          }
+        })
+      } catch (e) {
+        // Ignored if not running in capacitor native environment
+      }
+    }
+    setupNativeBack()
+
+    return () => {
+      window.removeEventListener('popstate', handlePopState)
+      if (backButtonListener && backButtonListener.remove) {
+        backButtonListener.remove()
+      }
+    }
   }, [currentChat, isSelectMode])
 
   // Profile Image Compression & Upload
