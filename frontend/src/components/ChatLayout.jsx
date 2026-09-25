@@ -2802,7 +2802,19 @@ export default function ChatLayout({ user }) {
                   const displayUsername = result.username || result.email?.split('@')[0] || 'user';
                   return (
                     <li key={result.uid} className="search-result-item">
-                      <div className="search-result-info">
+                      <div 
+                        className="search-result-info" 
+                        style={{ cursor: isFriend ? 'pointer' : 'default', flex: 1 }}
+                        onClick={() => {
+                          if (isFriend && !isSelf) {
+                            const existingChat = chats.find(c => c.otherUid === result.uid);
+                            if (existingChat) {
+                              setSearchQuery('');
+                              handleSelectChat(existingChat);
+                            }
+                          }
+                        }}
+                      >
                         <div className="search-result-avatar" style={{ position: 'relative' }}>
                           {resultPhoto ? (
                             <img src={resultPhoto} alt="Avatar" className="avatar-img" />
