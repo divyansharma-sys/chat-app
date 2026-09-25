@@ -17,12 +17,6 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Cache Android Debug Keystore
-        uses: actions/cache@v4
-        with:
-          path: ~/.android/debug.keystore
-          key: debug-keystore-${{ runner.os }}
-
       - name: Set up Java 21
         uses: actions/setup-java@v4
         with:
@@ -66,6 +60,8 @@ jobs:
 
       - name: Build Debug APK with Gradle
         working-directory: ./frontend/android
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
         run: |
           set -o pipefail
           ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee gradle-build.log
@@ -101,6 +97,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           apk_path=$(find frontend/android/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          # Try to create the release. If it exists, it will fail, which is fine.
-          gh release create latest $apk_path -t "Latest APK" -n "Latest Android APK Build" || \
-          gh release upload latest $apk_path --clobber
+          version="v1.0.${{ github.run_number }}"
+          echo "Uploading $apk_path to release latest as $version"
+          gh release create latest "$apk_path" -t "Latest APK ($version)" -n "Latest Android APK Build - $version" || \
+          (gh release edit latest -t "Latest APK ($version)" -n "Latest Android APK Build - $version" && gh release upload latest "$apk_path" --clobber)

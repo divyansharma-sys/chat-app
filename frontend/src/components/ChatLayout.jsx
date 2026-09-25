@@ -3925,6 +3925,60 @@ export default function ChatLayout({ user }) {
                 />
                 <span className="char-count">{profileBio.length}/100</span>
               </div>
+
+              {/* App Version & Update Center */}
+              <div style={{
+                marginTop: '1.25rem',
+                padding: '12px 14px',
+                borderRadius: '12px',
+                background: 'rgba(255, 255, 255, 0.04)',
+                border: '1px solid rgba(255, 255, 255, 0.08)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '12px'
+              }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                  <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-text-main, #fff)' }}>
+                    ChatFlow Mobile App
+                  </span>
+                  <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted, #8e9aaf)' }}>
+                    Auto-updates enabled • Latest Build
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const downloadUrl = 'https://github.com/divyansharma-sys/chat-app/releases/download/latest/app-debug.apk';
+                    if (window.Capacitor?.isNativePlatform?.()) {
+                      window.open(downloadUrl, '_system');
+                    } else {
+                      const a = document.createElement('a');
+                      a.href = downloadUrl;
+                      a.download = 'app-debug.apk';
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                    }
+                  }}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '8px 12px',
+                    fontSize: '0.8rem',
+                    fontWeight: 600,
+                    borderRadius: '8px',
+                    background: 'var(--color-primary, #6366f1)',
+                    color: '#fff',
+                    border: 'none',
+                    cursor: 'pointer',
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  <Download size={14} /> Update App
+                </button>
+              </div>
             </div>
 
             <div className="profile-modal-footer">

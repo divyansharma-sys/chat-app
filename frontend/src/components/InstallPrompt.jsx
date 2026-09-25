@@ -63,7 +63,13 @@ const InstallPrompt = () => {
       setDeferredPrompt(null);
     } else {
       // Fallback: direct download link from GitHub Releases
-      window.location.href = 'https://github.com/divyansharma-sys/chat-app/releases/download/latest/app-debug.apk';
+      const downloadUrl = 'https://github.com/divyansharma-sys/chat-app/releases/download/latest/app-debug.apk';
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = 'app-debug.apk';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
       setShowPrompt(false);
     }
   };

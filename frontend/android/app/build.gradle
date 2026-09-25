@@ -1,14 +1,28 @@
 apply plugin: 'com.android.application'
 
+def runNum = System.getenv("GITHUB_RUN_NUMBER")
+def appVersionCode = runNum ? (100 + Integer.parseInt(runNum)) : 100
+def appVersionName = "1.0." + (runNum ?: "0")
+
 android {
     namespace = "com.chatflow.app"
     compileSdk = rootProject.ext.compileSdkVersion
+
+    signingConfigs {
+        appSign {
+            storeFile file('chatflow.keystore')
+            storePassword 'chatflow123'
+            keyAlias 'chatflow'
+            keyPassword 'chatflow123'
+        }
+    }
+
     defaultConfig {
         applicationId "com.chatflow.appv2"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2
-        versionName "1.0"
+        versionCode appVersionCode
+        versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -17,7 +31,11 @@ android {
         }
     }
     buildTypes {
+        debug {
+            signingConfig signingConfigs.appSign
+        }
         release {
+            signingConfig signingConfigs.appSign
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
