@@ -61,19 +61,20 @@ jobs:
       - name: Build Debug APK with Gradle
         working-directory: ./frontend/android
         run: |
+          set -o pipefail
           ./gradlew assembleDebug --no-daemon --stacktrace 2>&1 | tee gradle-build.log
 
-      - name: Upload Build Log
+      - name: Output Summary
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-build-log
-          path: frontend/android/gradle-build.log
-          retention-days: 7
+        run: |
+          echo "### Gradle Build Output (Last 100 Lines)" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          tail -n 100 frontend/android/gradle-build.log >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: ChatFlow-Android-Debug-APK
-          path: frontend/android/app/build/outputs/apk/debug/app-debug.apk
+          path: frontend/android/app/build/outputs/apk/debug/*.apk
           retention-days: 14
