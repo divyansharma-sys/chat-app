@@ -5648,4 +5648,46 @@ body {
     justify-content: space-between;
   }
 }
+
+/* ============================================================
+   GROUP CALL MOBILE RESPONSIVENESS FIX
+   ============================================================ */
+@media (max-width: 768px) {
+  .group-call-main {
+    padding: 12px 12px 80px 12px;
+    overflow-y: auto;
+  }
+
+  .group-call-grid {
+    height: auto;
+    min-height: 100%;
+    padding-bottom: 24px;
+    gap: 8px;
+  }
+
+  .group-call-grid.grid-single {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+
+  .group-call-grid.grid-double {
+    grid-template-columns: 1fr;
+    grid-template-rows: repeat(2, minmax(300px, 1fr));
+  }
+
+  .group-call-grid.grid-quad {
+    grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: repeat(2, minmax(220px, 1fr));
+  }
+
+  .group-call-grid.grid-six,
+  .group-call-grid.grid-many {
+    grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: repeat(auto-fit, minmax(180px, 1fr));
+  }
+  
+  .group-call-tile {
+    border-radius: 12px;
+  }
+}
 
