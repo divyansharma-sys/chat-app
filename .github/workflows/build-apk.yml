@@ -48,13 +48,13 @@ jobs:
           sed -i 's/\r$//' gradlew
           chmod +x gradlew
 
-      - name: Sync Capacitor to Android
+      - name: Copy Web Assets to Android
         working-directory: ./frontend
-        run: npx cap sync android --verbose
+        run: npx cap copy android
 
       - name: Build Debug APK with Gradle
         working-directory: ./frontend/android
-        run: ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
 
       - name: Upload Debug APK
         uses: actions/upload-artifact@v4
