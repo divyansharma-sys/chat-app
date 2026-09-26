@@ -7,6 +7,7 @@ import {
   PhoneOff,
   Maximize2,
   Minimize2,
+  Minimize,
   Users,
   ShieldCheck,
   Crown,
@@ -142,6 +143,7 @@ export default function GroupCallModal({
   const [isScreenSharing, setIsScreenSharing] = useState(false)
   const [callDuration, setCallDuration] = useState(0)
   const [isFullScreen, setIsFullScreen] = useState(false)
+  const [isPiP, setIsPiP] = useState(false)
   const [pinnedUid, setPinnedUid] = useState(null)
   const [showDrawer, setShowDrawer] = useState(false)
   const [showEndConfirm, setShowEndConfirm] = useState(false)
@@ -282,6 +284,15 @@ export default function GroupCallModal({
               title={isFullScreen ? 'Exit Fullscreen' : 'Fullscreen'}
             >
               {isFullScreen ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
+            </button>
+
+            <button
+              type="button"
+              className={`call-header-btn ${isPiP ? 'active' : ''}`}
+              onClick={togglePiP}
+              title={isPiP ? 'Exit PiP' : 'Mini Player (PiP)'}
+            >
+              <Minimize size={18} />
             </button>
           </div>
         </div>

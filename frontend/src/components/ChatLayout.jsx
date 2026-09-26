@@ -1938,7 +1938,8 @@ export default function ChatLayout({ user }) {
         status: 'ringing',
         endCall: () => setActiveCallSession(null),
         toggleMic: () => {},
-        toggleCam: () => {}
+        toggleCam: () => {},
+        toggleScreenShare: () => {}
       })
 
       const session = await startCall({
@@ -1984,7 +1985,8 @@ export default function ChatLayout({ user }) {
           status: prev.status === 'connected' ? 'connected' : 'ringing',
           endCall: session.endCall,
           toggleMic: session.toggleMic,
-          toggleCam: session.toggleCam
+          toggleCam: session.toggleCam,
+          toggleScreenShare: session.toggleScreenShare
         }
       })
     } catch (err) {
@@ -2030,7 +2032,8 @@ export default function ChatLayout({ user }) {
           setActiveCallSession(null)
         },
         toggleMic: () => {},
-        toggleCam: () => {}
+        toggleCam: () => {},
+        toggleScreenShare: () => {}
       })
 
       const session = await answerCall({
@@ -2065,7 +2068,8 @@ export default function ChatLayout({ user }) {
           status: 'connected',
           endCall: session.endCall,
           toggleMic: session.toggleMic,
-          toggleCam: session.toggleCam
+          toggleCam: session.toggleCam,
+          toggleScreenShare: session.toggleScreenShare
         }
       })
     } catch (err) {

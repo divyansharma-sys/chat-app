@@ -245,6 +245,38 @@ export async function startCall({
     }
   }
 
+  let screenStream = null
+  let isSharingScreen = false
+
+  const toggleScreenShare = async () => {
+    if (isSharingScreen) {
+      if (screenStream) {
+        screenStream.getTracks().forEach(t => t.stop())
+        screenStream = null
+      }
+      isSharingScreen = false
+      const camTrack = localStream?.getVideoTracks()[0]
+      const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video')
+      if (sender && camTrack) await sender.replaceTrack(camTrack)
+      return false
+    } else {
+      try {
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+        const screenTrack = screenStream.getVideoTracks()[0]
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video')
+        if (sender) await sender.replaceTrack(screenTrack)
+        isSharingScreen = true
+        screenTrack.onended = () => {
+          toggleScreenShare().catch(console.warn)
+        }
+        return true
+      } catch (err) {
+        console.error('Screen share error:', err)
+        return false
+      }
+    }
+  }
+
   return {
     callId,
     pc,
@@ -253,7 +285,8 @@ export async function startCall({
     isEnded: () => isEnded,
     endCall,
     toggleMic,
-    toggleCam
+    toggleCam,
+    toggleScreenShare
   }
 }
 
@@ -448,6 +481,38 @@ export async function answerCall({
     }
   }
 
+  let screenStream = null
+  let isSharingScreen = false
+
+  const toggleScreenShare = async () => {
+    if (isSharingScreen) {
+      if (screenStream) {
+        screenStream.getTracks().forEach(t => t.stop())
+        screenStream = null
+      }
+      isSharingScreen = false
+      const camTrack = localStream?.getVideoTracks()[0]
+      const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video')
+      if (sender && camTrack) await sender.replaceTrack(camTrack)
+      return false
+    } else {
+      try {
+        screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true })
+        const screenTrack = screenStream.getVideoTracks()[0]
+        const sender = pc.getSenders().find(s => s.track && s.track.kind === 'video')
+        if (sender) await sender.replaceTrack(screenTrack)
+        isSharingScreen = true
+        screenTrack.onended = () => {
+          toggleScreenShare().catch(console.warn)
+        }
+        return true
+      } catch (err) {
+        console.error('Screen share error:', err)
+        return false
+      }
+    }
+  }
+
   return {
     callId,
     pc,
@@ -456,7 +521,8 @@ export async function answerCall({
     isEnded: () => isEnded,
     endCall,
     toggleMic,
-    toggleCam
+    toggleCam,
+    toggleScreenShare
   }
 }
 

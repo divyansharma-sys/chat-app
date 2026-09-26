@@ -5694,4 +5694,80 @@ body {
     border-radius: 12px;
   }
 }
-
+/* PiP Mode for Call Modal */
+.call-modal-backdrop.pip-mode {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 280px;
+  height: auto;
+  min-height: 160px;
+  inset: auto;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  border: 1px solid rgba(255,255,255,0.1);
+  background: #090d16;
+  pointer-events: auto;
+}
+.call-modal-backdrop.pip-mode .call-modal-container {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+.call-modal-backdrop.pip-mode .call-header-bar,
+.call-modal-backdrop.pip-mode .call-controls-bar {
+  padding: 8px;
+}
+.call-modal-backdrop.pip-mode .call-control-btn {
+  width: 32px;
+  height: 32px;
+}
+.call-modal-backdrop.pip-mode .call-control-btn svg {
+  width: 16px;
+  height: 16px;
+}
+.call-modal-backdrop.pip-mode .call-header-info {
+  font-size: 0.8rem;
+}
+/* PiP Mode for Group Call Modal */
+.group-call-modal-backdrop.pip-mode {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 320px;
+  height: auto;
+  min-height: 200px;
+  inset: auto;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  border: 1px solid rgba(255,255,255,0.1);
+  background: #090d16;
+  pointer-events: auto;
+}
+.group-call-modal-backdrop.pip-mode .group-call-modal-container {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+.group-call-modal-backdrop.pip-mode .group-call-header {
+  padding: 8px;
+}
+.group-call-modal-backdrop.pip-mode .call-header-btn {
+  width: 28px;
+  height: 28px;
+}
+.group-call-modal-backdrop.pip-mode .call-header-btn svg {
+  width: 14px;
+  height: 14px;
+}
+.group-call-modal-backdrop.pip-mode .group-call-grid {
+  grid-template-columns: 1fr;
+  grid-auto-rows: 1fr;
+  padding: 4px;
+}
+.group-call-modal-backdrop.pip-mode .group-call-controls {
+  padding: 8px;
+  gap: 8px;
+}

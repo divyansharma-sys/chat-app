@@ -7,8 +7,10 @@ import {
   PhoneOff,
   Maximize2,
   Minimize2,
+  Minimize,
   User,
-  ShieldCheck
+  ShieldCheck,
+  MonitorUp
 } from 'lucide-react'
 import { createOutgoingRingback } from '../../services/audioUtils'
 
@@ -23,7 +25,9 @@ export default function CallModal({
   const [isCamOn, setIsCamOn] = useState(isVideo)
   const [callDuration, setCallDuration] = useState(0)
   const [isFullScreen, setIsFullScreen] = useState(false)
+  const [isPiP, setIsPiP] = useState(false)
   const [autoplayBlocked, setAutoplayBlocked] = useState(false)
+  const [isSharingScreen, setIsSharingScreen] = useState(false)
 
   const localVideoRef = useRef(null)
   const remoteVideoRef = useRef(null)
@@ -126,6 +130,17 @@ export default function CallModal({
     callSession.toggleCam(next)
   }
 
+  const handleToggleScreenShare = async () => {
+    if (callSession.toggleScreenShare) {
+      try {
+        const sharing = await callSession.toggleScreenShare()
+        setIsSharingScreen(sharing)
+      } catch (err) {
+        setIsSharingScreen(false)
+      }
+    }
+  }
+
   const handleEndCall = () => {
     if (ringbackRef.current) ringbackRef.current.stop()
     if (timerRef.current) clearInterval(timerRef.current)
@@ -143,6 +158,10 @@ export default function CallModal({
     }
   }
 
+  const togglePiP = () => {
+    setIsPiP(!isPiP)
+  }
+
   const formatTimer = (secs) => {
     const m = Math.floor(secs / 60)
     const s = secs % 60
@@ -150,7 +169,7 @@ export default function CallModal({
   }
 
   return (
-    <div className={`call-modal-backdrop ${isFullScreen ? 'fullscreen' : ''}`}>
+    <div className={`call-modal-backdrop ${isFullScreen ? 'fullscreen' : ''} ${isPiP ? 'pip-mode' : ''}`}>
       <div className="call-modal-container">
         {/* Top Header */}
         <div className="call-header-bar">
@@ -274,6 +293,26 @@ export default function CallModal({
               {isCamOn ? <Video size={22} /> : <VideoOff size={22} />}
             </button>
           )}
+
+          {isVideo && (
+            <button
+              type="button"
+              className={`call-control-btn ${isSharingScreen ? 'active' : ''}`}
+              onClick={handleToggleScreenShare}
+              title="Share Screen"
+            >
+              <MonitorUp size={22} />
+            </button>
+          )}
+
+          <button
+            type="button"
+            className={`call-control-btn ${isPiP ? 'active' : ''}`}
+            onClick={togglePiP}
+            title={isPiP ? 'Exit PiP' : 'Mini Player (PiP)'}
+          >
+            <Minimize size={22} />
+          </button>
 
           <button
             type="button"
