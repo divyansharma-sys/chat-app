@@ -1,8 +1,8 @@
 apply plugin: 'com.android.application'
 
 def runNum = System.getenv("GITHUB_RUN_NUMBER")
-def appVersionCode = runNum ? (100 + Integer.parseInt(runNum)) : 100
-def appVersionName = "1.0." + (runNum ?: "0")
+def appVersionCode = runNum ? (101 + Integer.parseInt(runNum)) : 101
+def appVersionName = "1.1." + (runNum ?: "0")
 
 android {
     namespace = "com.chatflow.app"
